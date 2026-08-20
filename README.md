@@ -1,0 +1,130 @@
+# Paper Task Launcher
+
+`paper-task` creates one isolated repository and one new interactive Codex session per paper-learning
+website task. It imports the paper's LaTeX source into an ignored `paper-source/` directory, asks
+Codex to build a frontend that helps users read, understand, and learn the paper, and records only
+user messages, final model responses, and code snapshots for that session. The fixed task explicitly
+does not ask Codex to implement the paper's algorithm or reproduce its experiments.
+
+## Requirements
+
+- Python 3.10+
+- Git
+- Codex CLI, already logged in
+- `pdftotext` only when the input is a generic (non-arXiv) PDF URL
+- Network access for arXiv or PDF URLs
+
+## Install
+
+```bash
+python3 -m pip install -e ./paper_task_launcher
+```
+
+## Use
+
+The workspace must be new or completely empty and must not be inside another Git worktree.
+
+```bash
+paper-task \
+  --workspace /absolute/path/to/new-task \
+  --paper /absolute/path/to/local-latex-source
+```
+
+The paper may instead be an arXiv ID, arXiv abstract/PDF URL, or a PDF URL:
+
+```bash
+paper-task --workspace /absolute/path/to/new-task --paper 2401.01234
+paper-task --workspace /absolute/path/to/new-task --paper https://arxiv.org/abs/2401.01234
+```
+
+The launcher prints progress while it validates the workspace, identifies the paper, downloads and
+extracts the source, initializes Git, launches Codex, and finalizes the recording. arXiv requests
+retry automatically with a short backoff and fall back between the official HTTP API endpoint and
+HTTPS endpoints.
+
+The defaults can be adjusted for a slow or proxied network:
+
+```bash
+PAPER_TASK_NETWORK_TIMEOUT=60 PAPER_TASK_NETWORK_RETRIES=3 \
+  paper-task --workspace /absolute/path/to/new-task --paper 2401.01234
+```
+
+For a generic PDF URL, the launcher downloads the first page text, searches arXiv by title, and
+continues only when one result is an unambiguous match. It never silently chooses among ambiguous
+papers.
+
+Use `--prepare-only` to validate/import/init without opening Codex:
+
+```bash
+paper-task --workspace /absolute/path/to/new-task --paper /path/to/latex --prepare-only
+```
+
+## Output
+
+```text
+new-task/
+  .git/
+  .gitignore
+  paper-source/                # ignored, never included in snapshots
+  .recording/                  # ignored
+    initial-prompt.md
+    manifest.json
+    transcript.jsonl
+    snapshots.jsonl
+```
+
+Each completed turn is written as one `transcript.jsonl` record. The corresponding code tree is a
+Git commit reachable at:
+
+```text
+refs/recorder/<recording-id>/turn/0001
+refs/recorder/<recording-id>/turn/0002
+refs/recorder/<recording-id>/latest
+```
+
+The pre-conversation baseline is stored at `refs/recorder/<recording-id>/baseline`.
+
+The recorder uses a private Git index, so it does not switch branches or modify the user's normal
+staging area. Inspect a turn with `git show <ref>` or restore it into a separate worktree.
+
+## Export a dataset
+
+After the Codex session ends, export all collected data and full code versions into a new or empty
+directory:
+
+```bash
+paper-task export \
+  --workspace /absolute/path/to/task \
+  --output /absolute/path/to/exported-dataset
+```
+
+The result is self-contained and does not require the task repository's `.git` directory:
+
+```text
+exported-dataset/
+  dataset.json                 # stable schema, paper/session summary, baseline and relative paths
+  recording-manifest.json      # original collection metadata and provenance
+  initial-prompt.md
+  turns.jsonl                  # one record per completed turn, including code_path and commit
+  paper-source/                # imported LaTeX source
+  versions/
+    baseline/                  # code before the conversation
+    turn-0001/                 # complete code after turn 1
+    turn-0002/                 # complete code after turn 2
+```
+
+Each `turns.jsonl` record contains the user input, final model response, timestamps, original Git
+snapshot metadata, and a relative `code_path`. The exporter verifies every commit before writing the
+dataset and refuses to overwrite a non-empty output directory. Use `--no-paper-source` when the
+downstream dataset should contain only conversation metadata and code versions.
+
+## Data and failure behavior
+
+- Local source repositories are copied without `.git`; symbolic links are rejected.
+- arXiv archives are checked for path traversal, links, devices, excessive size, and file count.
+- The exact rendered first prompt, paper hashes, arXiv version, session ID, and Codex CLI version are
+  stored in the manifest.
+- If source identification/import fails, Codex is not launched.
+- A failed preparation removes only launcher-created files and leaves the selected workspace empty,
+  so the same directory can be retried.
+- If Codex exits, recording stops and the manifest is finalized.
