@@ -88,6 +88,10 @@ extracts the source, initializes Git, launches Codex, and finalizes the recordin
 retry automatically with a short backoff and fall back between the official HTTP API endpoint and
 HTTPS endpoints.
 
+When an arXiv ID or arXiv URL is provided directly, the launcher skips the metadata API and downloads
+the LaTeX source immediately, so a metadata API timeout cannot block the task. The metadata API is
+used only when a generic PDF URL must first be matched to an arXiv paper.
+
 The defaults can be adjusted for a slow or proxied network:
 
 ```bash

@@ -122,18 +122,17 @@ class PaperTests(unittest.TestCase):
                     tar.addfile(info, io.BytesIO(content))
                 return "archive-sha", 123, "https://arxiv.org/e-print/2401.01234"
 
-            entry = {
-                "id": "2401.01234",
-                "title": "Example Paper",
-                "authors": ["A. Author"],
-                "url": "https://arxiv.org/abs/2401.01234",
-            }
-            with patch("paper_task_launcher.paper.query_arxiv_by_id", return_value=entry), patch(
+            with patch("paper_task_launcher.paper.query_arxiv_by_id") as metadata_api, patch(
                 "paper_task_launcher.paper._download", side_effect=fake_download
             ):
                 metadata = import_paper("2401.01234", destination)
+            metadata_api.assert_not_called()
             self.assertEqual(metadata.kind, "arxiv_source")
             self.assertEqual(metadata.arxiv_id, "2401.01234")
+            self.assertIsNone(metadata.title)
+            self.assertIsNone(metadata.authors)
+            self.assertIsNone(metadata.metadata_api_url)
+            self.assertEqual(metadata.api_entry_url, "https://arxiv.org/abs/2401.01234")
             self.assertEqual(metadata.downloaded_archive_sha256, "archive-sha")
             self.assertTrue((destination / "main.tex").exists())
 

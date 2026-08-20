@@ -408,8 +408,15 @@ def import_paper(
     pdf_hash = None
     if arxiv_id:
         if progress:
-            progress(f"已识别 arXiv ID：{arxiv_id}，正在查询论文信息…")
-        entry = query_arxiv_by_id(arxiv_id, progress=progress)
+            progress(f"已识别 arXiv ID：{arxiv_id}，将直接下载论文源码…")
+        # An explicit arXiv ID already identifies the source archive unambiguously.
+        # Do not make successful import depend on the less reliable metadata API.
+        entry = {
+            "id": arxiv_id,
+            "title": None,
+            "authors": None,
+            "url": f"https://arxiv.org/abs/{arxiv_id}",
+        }
     elif parsed.scheme in {"http", "https"}:
         if progress:
             progress("正在读取 PDF 并通过 arXiv API 匹配论文…")
@@ -422,7 +429,8 @@ def import_paper(
 
     assert arxiv_id is not None
     if progress:
-        progress(f"已找到论文：{entry['title']}")
+        if entry.get("title"):
+            progress(f"已找到论文：{entry['title']}")
         progress("正在下载 arXiv LaTeX 源码包…")
     with tempfile.TemporaryDirectory(prefix="paper-task-arxiv-") as temporary:
         archive = Path(temporary) / "source"
@@ -448,9 +456,9 @@ def import_paper(
         source_sha256=digest,
         file_count=count,
         arxiv_id=arxiv_id,
-        title=entry["title"],
-        authors=entry["authors"],
-        api_entry_url=entry["url"],
+        title=entry.get("title"),
+        authors=entry.get("authors"),
+        api_entry_url=entry.get("url"),
         downloaded_archive_sha256=archive_hash,
         downloaded_archive_url=source_url,
         metadata_api_url=entry.get("metadata_api_url"),
