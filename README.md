@@ -36,6 +36,36 @@ paper-task export \
   --output /absolute/path/to/exported-dataset
 ```
 
+## 中文快速开始
+
+首先克隆并安装启动器：
+
+```bash
+git clone https://github.com/HungryFlo/paper_task_launcher.git
+cd paper_task_launcher
+python3 -m pip install -e .
+```
+
+为每篇论文新建一个独立任务目录，然后启动全新的 Codex 论文阅读会话：
+
+```bash
+paper-task \
+  --workspace /absolute/path/to/new-task \
+  --paper /absolute/path/to/local-latex-source
+```
+
+`--paper` 也可以接受 arXiv ID、arXiv 链接或 PDF 链接。任务完成并退出 Codex 后，将完整
+对话记录、论文源码以及每轮代码版本导出为便于后续处理的数据集：
+
+```bash
+paper-task export \
+  --workspace /absolute/path/to/new-task \
+  --output /absolute/path/to/exported-dataset
+```
+
+启动器在新会话第一轮发送给 Codex 的初始提示词定义在
+[`PROMPT_TEMPLATE`](paper_task_launcher/launcher.py#L16-L32)，可以直接查看当前任务要求和项目规则。
+
 ## Use
 
 The workspace must be new or completely empty and must not be inside another Git worktree.
