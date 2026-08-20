@@ -17,7 +17,23 @@ does not ask Codex to implement the paper's algorithm or reproduce its experimen
 ## Install
 
 ```bash
-python3 -m pip install -e ./paper_task_launcher
+git clone https://github.com/HungryFlo/paper_task_launcher.git
+cd paper_task_launcher
+python3 -m pip install -e .
+```
+
+## Quick start
+
+```bash
+# 开始阅读
+paper-task \
+  --workspace /absolute/path/to/new-task \
+  --paper /absolute/path/to/local-latex-source
+
+# 导出数据
+paper-task export \
+  --workspace /absolute/path/to/new-task \
+  --output /absolute/path/to/exported-dataset
 ```
 
 ## Use
