@@ -44,6 +44,7 @@ class ExporterTests(unittest.TestCase):
             self.assertEqual(result, output)
             dataset = json.loads((output / "dataset.json").read_text())
             self.assertEqual(dataset["schema"], "paper-task-dataset-v1")
+            self.assertEqual(dataset["backend"], "codex")
             self.assertEqual(dataset["turn_count"], 1)
             exported_turn = json.loads((output / "turns.jsonl").read_text())
             self.assertEqual(exported_turn["code_path"], "versions/turn-0001")

@@ -99,15 +99,69 @@ time.sleep(0.4)
             self.assertIn("前端网页", transcript[0]["user_input"])
             self.assertIn("对用户友好", transcript[0]["user_input"])
             self.assertIn("高覆盖率", transcript[0]["user_input"])
-            self.assertIn("保留论文关键信息", transcript[0]["user_input"])
-            self.assertIn("尽量不遗漏论文中的重要内容与细节", transcript[0]["user_input"])
-            self.assertIn("渐进方式", transcript[0]["user_input"])
+            self.assertIn("尽量不遗漏论文中的内容与细节", transcript[0]["user_input"])
+            self.assertIn("渐进信息展现方式", transcript[0]["user_input"])
             self.assertIn("项目规则", transcript[0]["user_input"])
             self.assertNotIn("复现", transcript[0]["user_input"])
             self.assertNotIn("术语表", transcript[0]["user_input"])
             self.assertNotIn("响应式布局", transcript[0]["user_input"])
             manifest = json.loads((workspace / ".recording" / "manifest.json").read_text())
             self.assertEqual(manifest["session_id"], "session-test")
+            self.assertEqual(manifest["turn_count"], 1)
+            self.assertEqual(manifest["state"], "completed")
+
+    def test_full_launch_with_fake_claude_hooks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = root / "paper"
+            paper.mkdir()
+            (paper / "main.tex").write_text("paper", encoding="utf-8")
+            workspace = root / "task"
+            fake = root / "fake-claude"
+            fake.write_text(
+                """#!/usr/bin/env python3
+import json, subprocess, sys
+from pathlib import Path
+settings_path = Path(sys.argv[sys.argv.index('--settings') + 1])
+prompt = sys.argv[-1]
+settings = json.loads(settings_path.read_text())
+workspace = Path.cwd()
+common = {'session_id':'claude-session','transcript_path':'/tmp/claude.jsonl','cwd':str(workspace)}
+events = [
+  {**common,'hook_event_name':'SessionStart','model':'claude-test'},
+  {**common,'hook_event_name':'UserPromptSubmit','prompt_id':'prompt-1','prompt':prompt},
+]
+for event in events:
+    hook = settings['hooks'][event['hook_event_name']][0]['hooks'][0]
+    subprocess.run([hook['command'], *hook['args']], input=json.dumps(event), text=True, check=True)
+(workspace / 'claude-app.py').write_text("print('ok')\\n")
+stop = {**common,'hook_event_name':'Stop','prompt_id':'prompt-1','last_assistant_message':'claude done','stop_hook_active':False}
+hook = settings['hooks']['Stop'][0]['hooks'][0]
+subprocess.run([hook['command'], *hook['args']], input=json.dumps(stop), text=True, check=True)
+""",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+
+            code = launch_task(
+                str(workspace),
+                str(paper),
+                backend="claude",
+                claude_bin=str(fake),
+                progress=None,
+            )
+
+            self.assertEqual(code, 0)
+            transcript = json.loads(
+                (workspace / ".recording" / "transcript.jsonl").read_text()
+            )
+            self.assertIn("论文 LaTeX 源码", transcript["user_input"])
+            self.assertEqual(transcript["final_response"], "claude done")
+            manifest = json.loads(
+                (workspace / ".recording" / "manifest.json").read_text()
+            )
+            self.assertEqual(manifest["backend"], "claude")
+            self.assertEqual(manifest["session_id"], "claude-session")
             self.assertEqual(manifest["turn_count"], 1)
             self.assertEqual(manifest["state"], "completed")
 

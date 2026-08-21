@@ -170,6 +170,7 @@ def export_dataset(
             "exported_at": utc_now(),
             "recording_id": manifest.get("recording_id"),
             "session_id": manifest.get("session_id"),
+            "backend": manifest.get("backend", "codex"),
             "recording_state": manifest.get("state"),
             "turn_count": len(normalized_turns),
             "paper": manifest.get("paper"),

@@ -32,7 +32,7 @@ ARXIV_SOURCE_ENDPOINTS = (
     "https://export.arxiv.org/e-print/{arxiv_id}",
     "http://export.arxiv.org/e-print/{arxiv_id}",
 )
-USER_AGENT = "paper-task-launcher/0.1 (research tooling)"
+USER_AGENT = "paper-task-launcher/0.2 (research tooling)"
 MAX_DOWNLOAD = 512 * 1024 * 1024
 MAX_ARCHIVE_FILES = 20_000
 MAX_API_RESPONSE = 8 * 1024 * 1024

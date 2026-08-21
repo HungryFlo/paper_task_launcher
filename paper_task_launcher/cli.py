@@ -13,7 +13,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="paper-task",
         description=(
             "Create an isolated Git repository, import a paper's LaTeX source, launch a new "
-            "Codex session, and record final responses plus per-turn code snapshots."
+            "Codex or Claude Code session, and record final responses plus per-turn code snapshots."
         ),
         epilog="Export a completed recording with: paper-task export --help",
     )
@@ -23,11 +23,18 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Local LaTeX directory, arXiv ID/URL, or PDF URL",
     )
+    parser.add_argument(
+        "--backend",
+        choices=("codex", "claude"),
+        default="codex",
+        help="Interactive coding agent to launch (default: codex)",
+    )
     parser.add_argument("--codex-bin", default="codex", help="Codex CLI executable")
+    parser.add_argument("--claude-bin", default="claude", help="Claude Code CLI executable")
     parser.add_argument(
         "--prepare-only",
         action="store_true",
-        help="Prepare the isolated repository without launching Codex",
+        help="Prepare the isolated repository without launching the selected agent",
     )
     return parser
 
@@ -63,7 +70,9 @@ def main(argv: list[str] | None = None) -> int:
         return launch_task(
             args.workspace,
             args.paper,
+            backend=args.backend,
             codex_bin=args.codex_bin,
+            claude_bin=args.claude_bin,
             prepare_only=args.prepare_only,
         )
     except LauncherError as exc:
