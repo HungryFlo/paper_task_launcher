@@ -13,14 +13,14 @@ from .paper import PaperMetadata, import_paper
 from .recorder import SessionRecorder
 from .util import append_jsonl, atomic_json, utc_now
 
-PROMPT_TEMPLATE_VERSION = "paper-learning-web-v3"
+PROMPT_TEMPLATE_VERSION = "paper-learning-web-v4"
 PROMPT_TEMPLATE = """你正在一个新建、隔离且独立的 Git 仓库中完成论文学习网站任务。
 
 论文 LaTeX 源码已经导入到：./paper-source/
 论文标识：{paper_identity}
 论文源码 SHA-256：{paper_sha256}
 
-任务：创建一个对用户友好的前端网页，辅助用户阅读、理解和学习这一整篇论文。在保留论文关键信息的前提下，以渐进方式帮助用户学习。
+任务：创建一个前端网页，辅助用户阅读、理解和学习这一整篇论文。网页应对论文信息保持高覆盖率，尽量不遗漏论文中的内容与细节，以满足读者深入学习的需求；并以对用户友好的渐进信息展现方式帮助用户学习。
 
 项目规则：
 1. 开始实现前先完整阅读论文源码，网页内容应以论文为依据。
