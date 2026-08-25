@@ -9,7 +9,13 @@ from unittest.mock import patch
 
 from paper_task_launcher.errors import LauncherError
 from paper_task_launcher.git_history import SnapshotStore
-from paper_task_launcher.launcher import launch_task, prepare_task, validate_empty_workspace
+from paper_task_launcher.launcher import (
+    launch_task,
+    prepare_task,
+    resume_task,
+    validate_empty_workspace,
+)
+from paper_task_launcher.util import run_checked
 
 
 class LauncherTests(unittest.TestCase):
@@ -66,16 +72,26 @@ class LauncherTests(unittest.TestCase):
 import json, os, sys, time
 from pathlib import Path
 workspace = Path(sys.argv[sys.argv.index('--cd') + 1]).resolve()
-prompt = sys.argv[-1]
 log = Path(os.environ['CODEX_HOME']) / 'sessions' / '2026' / '01' / '01' / 'rollout-test.jsonl'
 log.parent.mkdir(parents=True, exist_ok=True)
-records = [
-  {'timestamp':'2026-01-01T00:00:00Z','ordinal':0,'type':'session_meta','payload':{'session_id':'session-test','cwd':str(workspace),'cli_version':'test'}},
-  {'timestamp':'2026-01-01T00:00:01Z','ordinal':1,'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-test'}},
-  {'timestamp':'2026-01-01T00:00:02Z','ordinal':2,'type':'event_msg','payload':{'type':'item_completed','turn_id':'turn-test','item':{'type':'UserMessage','content':[{'type':'text','text':prompt}]}}},
-  {'timestamp':'2026-01-01T00:00:03Z','ordinal':3,'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-test','last_agent_message':'done','completed_at':'2026-01-01T00:00:03Z'}},
-]
-with log.open('w') as handle:
+if len(sys.argv) > 1 and sys.argv[1] == 'resume':
+    records = [
+      {'timestamp':'2026-01-01T00:01:01Z','ordinal':4,'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-resume'}},
+      {'timestamp':'2026-01-01T00:01:02Z','ordinal':5,'type':'event_msg','payload':{'type':'item_completed','turn_id':'turn-resume','item':{'type':'UserMessage','content':[{'type':'text','text':'follow up'}]}}},
+      {'timestamp':'2026-01-01T00:01:03Z','ordinal':6,'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-resume','last_agent_message':'resumed done','completed_at':'2026-01-01T00:01:03Z'}},
+    ]
+    mode = 'a'
+    (workspace / 'resumed.py').write_text("print('resumed')\\n")
+else:
+    prompt = sys.argv[-1]
+    records = [
+      {'timestamp':'2026-01-01T00:00:00Z','ordinal':0,'type':'session_meta','payload':{'session_id':'session-test','cwd':str(workspace),'cli_version':'test'}},
+      {'timestamp':'2026-01-01T00:00:01Z','ordinal':1,'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-test'}},
+      {'timestamp':'2026-01-01T00:00:02Z','ordinal':2,'type':'event_msg','payload':{'type':'item_completed','turn_id':'turn-test','item':{'type':'UserMessage','content':[{'type':'text','text':prompt}]}}},
+      {'timestamp':'2026-01-01T00:00:03Z','ordinal':3,'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-test','last_agent_message':'done','completed_at':'2026-01-01T00:00:03Z'}},
+    ]
+    mode = 'w'
+with log.open(mode) as handle:
     for record in records:
         handle.write(json.dumps(record) + '\\n')
         handle.flush()
@@ -110,6 +126,40 @@ time.sleep(0.4)
             self.assertEqual(manifest["turn_count"], 1)
             self.assertEqual(manifest["state"], "completed")
 
+            # Older recordings have no saved log offset. Resume must safely rescan
+            # their log without duplicating the already recorded turn.
+            manifest.pop("session_log_offset", None)
+            (workspace / ".recording" / "manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+
+            with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                code = resume_task(str(workspace), codex_bin=str(fake), progress=None)
+            self.assertEqual(code, 0)
+            transcript = [
+                json.loads(line)
+                for line in (workspace / ".recording" / "transcript.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(len(transcript), 2)
+            self.assertEqual(transcript[1]["turn_index"], 2)
+            self.assertEqual(transcript[1]["user_input"], "follow up")
+            self.assertEqual(transcript[1]["final_response"], "resumed done")
+            self.assertEqual(
+                transcript[1]["snapshot"]["index"], 2
+            )
+            self.assertEqual(
+                run_checked(
+                    ["git", "rev-parse", f"{transcript[1]['snapshot']['commit']}^"],
+                    cwd=workspace,
+                ),
+                transcript[0]["snapshot"]["commit"],
+            )
+            manifest = json.loads((workspace / ".recording" / "manifest.json").read_text())
+            self.assertEqual(manifest["turn_count"], 2)
+            self.assertEqual(manifest["resume_count"], 1)
+            self.assertEqual(manifest["resume_history"][0]["turn_count_before"], 1)
+            self.assertEqual(manifest["resume_history"][0]["turn_count_after"], 2)
+
     def test_full_launch_with_fake_claude_hooks(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -123,19 +173,21 @@ time.sleep(0.4)
 import json, subprocess, sys
 from pathlib import Path
 settings_path = Path(sys.argv[sys.argv.index('--settings') + 1])
-prompt = sys.argv[-1]
 settings = json.loads(settings_path.read_text())
 workspace = Path.cwd()
 common = {'session_id':'claude-session','transcript_path':'/tmp/claude.jsonl','cwd':str(workspace)}
+resuming = '--resume' in sys.argv
+prompt = 'claude follow up' if resuming else sys.argv[-1]
+prompt_id = 'prompt-2' if resuming else 'prompt-1'
 events = [
   {**common,'hook_event_name':'SessionStart','model':'claude-test'},
-  {**common,'hook_event_name':'UserPromptSubmit','prompt_id':'prompt-1','prompt':prompt},
+  {**common,'hook_event_name':'UserPromptSubmit','prompt_id':prompt_id,'prompt':prompt},
 ]
 for event in events:
     hook = settings['hooks'][event['hook_event_name']][0]['hooks'][0]
     subprocess.run([hook['command'], *hook['args']], input=json.dumps(event), text=True, check=True)
-(workspace / 'claude-app.py').write_text("print('ok')\\n")
-stop = {**common,'hook_event_name':'Stop','prompt_id':'prompt-1','last_assistant_message':'claude done','stop_hook_active':False}
+(workspace / ('claude-resumed.py' if resuming else 'claude-app.py')).write_text("print('ok')\\n")
+stop = {**common,'hook_event_name':'Stop','prompt_id':prompt_id,'last_assistant_message':('claude resumed' if resuming else 'claude done'),'stop_hook_active':False}
 hook = settings['hooks']['Stop'][0]['hooks'][0]
 subprocess.run([hook['command'], *hook['args']], input=json.dumps(stop), text=True, check=True)
 """,
@@ -164,6 +216,23 @@ subprocess.run([hook['command'], *hook['args']], input=json.dumps(stop), text=Tr
             self.assertEqual(manifest["session_id"], "claude-session")
             self.assertEqual(manifest["turn_count"], 1)
             self.assertEqual(manifest["state"], "completed")
+
+            code = resume_task(
+                str(workspace), claude_bin=str(fake), progress=None
+            )
+            self.assertEqual(code, 0)
+            transcript = [
+                json.loads(line)
+                for line in (workspace / ".recording" / "transcript.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(len(transcript), 2)
+            self.assertEqual(transcript[1]["user_input"], "claude follow up")
+            self.assertEqual(transcript[1]["final_response"], "claude resumed")
+            manifest = json.loads(
+                (workspace / ".recording" / "manifest.json").read_text()
+            )
+            self.assertEqual(manifest["turn_count"], 2)
+            self.assertEqual(manifest["resume_count"], 1)
 
 
 if __name__ == "__main__":

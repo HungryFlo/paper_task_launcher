@@ -5,7 +5,7 @@ import sys
 
 from .errors import LauncherError
 from .exporter import export_dataset
-from .launcher import launch_task
+from .launcher import launch_task, resume_task
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,7 +15,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Create an isolated Git repository, import a paper's LaTeX source, launch a new "
             "Codex or Claude Code session, and record final responses plus per-turn code snapshots."
         ),
-        epilog="Export a completed recording with: paper-task export --help",
+        epilog=(
+            "Resume an interrupted recording with: paper-task resume --help; "
+            "export it with: paper-task export --help"
+        ),
     )
     parser.add_argument("--workspace", required=True, help="New or empty task directory")
     parser.add_argument(
@@ -54,6 +57,17 @@ def build_export_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_resume_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="paper-task resume",
+        description="Resume the recorded Codex or Claude Code session in an existing task.",
+    )
+    parser.add_argument("--workspace", required=True, help="Existing recorded task directory")
+    parser.add_argument("--codex-bin", default="codex", help="Codex CLI executable")
+    parser.add_argument("--claude-bin", default="claude", help="Claude Code CLI executable")
+    return parser
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = list(argv) if argv is not None else sys.argv[1:]
     try:
@@ -66,6 +80,13 @@ def main(argv: list[str] | None = None) -> int:
                 progress=lambda message: print(f"[paper-task] {message}", flush=True),
             )
             return 0
+        if arguments and arguments[0] == "resume":
+            args = build_resume_parser().parse_args(arguments[1:])
+            return resume_task(
+                args.workspace,
+                codex_bin=args.codex_bin,
+                claude_bin=args.claude_bin,
+            )
         args = build_parser().parse_args(arguments)
         return launch_task(
             args.workspace,

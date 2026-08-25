@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import shutil
 import subprocess
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -13,7 +15,7 @@ from .errors import LauncherError
 from .git_history import SnapshotStore, initialize_repository, is_inside_existing_worktree
 from .paper import PaperMetadata, import_paper
 from .recorder import SessionRecorder
-from .util import append_jsonl, atomic_json, utc_now
+from .util import append_jsonl, atomic_json, run_checked, utc_now
 
 PROMPT_TEMPLATE_VERSION = "paper-learning-web-v4"
 PROMPT_TEMPLATE = """你正在一个新建、隔离且独立的 Git 仓库中完成论文学习网站任务。
@@ -140,6 +142,196 @@ def prepare_task(
 
 def console_progress(message: str) -> None:
     print(f"[paper-task] {message}", flush=True)
+
+
+def _load_recording(workspace_value: str) -> tuple[Path, Path, dict]:
+    workspace = Path(workspace_value).expanduser().resolve()
+    recording_dir = workspace / ".recording"
+    manifest_path = recording_dir / "manifest.json"
+    if not workspace.is_dir() or not (workspace / ".git").is_dir():
+        raise LauncherError(f"Not a paper-task Git workspace: {workspace}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise LauncherError(f"Recording manifest not found: {manifest_path}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LauncherError(f"Unable to read recording manifest: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise LauncherError("Recording manifest must contain a JSON object")
+    recorded_workspace = manifest.get("workspace")
+    if not isinstance(recorded_workspace, str) or Path(recorded_workspace).resolve() != workspace:
+        raise LauncherError("Recording manifest belongs to a different workspace")
+    recording_id = manifest.get("recording_id")
+    session_id = manifest.get("session_id")
+    backend = manifest.get("backend", "codex")
+    count = manifest.get("turn_count", 0)
+    if not isinstance(recording_id, str) or not recording_id:
+        raise LauncherError("Recording manifest has no valid recording ID")
+    if not isinstance(session_id, str) or not session_id:
+        raise LauncherError("No agent session has been recorded yet; this task cannot be resumed")
+    if backend not in {"codex", "claude"}:
+        raise LauncherError(f"Unsupported recorded backend: {backend}")
+    if not isinstance(count, int) or count < 0:
+        raise LauncherError("Recording manifest has an invalid turn count")
+
+    transcript_path = recording_dir / "transcript.jsonl"
+    transcript_count = 0
+    if transcript_path.exists():
+        try:
+            for line in transcript_path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    value = json.loads(line)
+                    if not isinstance(value, dict):
+                        raise ValueError("record is not an object")
+                    transcript_count += 1
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise LauncherError(f"Invalid recording transcript: {exc}") from exc
+    if transcript_count != count:
+        raise LauncherError(
+            f"Recording is inconsistent: manifest has {count} turns but transcript has {transcript_count}"
+        )
+    previous = manifest.get("latest_snapshot") or manifest.get("baseline_snapshot")
+    if not isinstance(previous, dict) or not isinstance(previous.get("commit"), str):
+        raise LauncherError("Recording manifest has no valid previous snapshot")
+    try:
+        run_checked(
+            ["git", "cat-file", "-e", f"{previous['commit']}^{{commit}}"],
+            cwd=workspace,
+        )
+    except LauncherError as exc:
+        raise LauncherError("The latest recorded Git snapshot is missing") from exc
+    return workspace, recording_dir, manifest
+
+
+@contextmanager
+def _recording_lock(recording_dir: Path):
+    lock_path = recording_dir / "session.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise LauncherError("This task is already open in another launcher process") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def resume_task(
+    workspace_value: str,
+    *,
+    codex_bin: str = "codex",
+    claude_bin: str = "claude",
+    progress: Callable[[str], None] | None = console_progress,
+) -> int:
+    workspace, recording_dir, manifest = _load_recording(workspace_value)
+    backend = manifest.get("backend", "codex")
+    session_id = str(manifest["session_id"])
+    agent_bin = codex_bin if backend == "codex" else claude_bin
+    agent_name = "Codex" if backend == "codex" else "Claude Code"
+    if shutil.which(agent_bin) is None:
+        raise LauncherError(f"{agent_name} executable not found: {agent_bin}")
+
+    with _recording_lock(recording_dir):
+        # Reload after acquiring the lock so validation and append use the latest state.
+        workspace, recording_dir, manifest = _load_recording(workspace_value)
+        resume_history = manifest.setdefault("resume_history", [])
+        if not isinstance(resume_history, list):
+            raise LauncherError("Recording manifest has invalid resume history")
+        resume_entry = {
+            "index": len(resume_history) + 1,
+            "started_at": utc_now(),
+            "previous_state": manifest.get("state"),
+            "turn_count_before": manifest.get("turn_count", 0),
+        }
+        resume_history.append(resume_entry)
+        manifest["resume_count"] = len(resume_history)
+        manifest["state"] = "recording"
+        manifest["agent_started_at"] = resume_entry["started_at"]
+        atomic_json(recording_dir / "manifest.json", manifest)
+
+        if backend == "codex":
+            existing_logs = SessionRecorder.current_logs()
+            resume_offsets: dict[Path, int] = {}
+            recorded_log = manifest.get("session_log")
+            if isinstance(recorded_log, str):
+                log_path = Path(recorded_log)
+                if log_path.is_file():
+                    saved_offset = manifest.get("session_log_offset", 0)
+                    if not isinstance(saved_offset, int) or saved_offset < 0:
+                        saved_offset = 0
+                    resume_offsets[log_path] = min(saved_offset, log_path.stat().st_size)
+            recorder = SessionRecorder(
+                workspace=workspace,
+                recording_dir=recording_dir,
+                recording_id=str(manifest["recording_id"]),
+                manifest=manifest,
+                launch_time=time.time(),
+                existing_logs=existing_logs,
+                resume_session_id=session_id,
+                resume_offsets=resume_offsets,
+            )
+            recorder.start()
+            command = [codex_bin, "resume", "--cd", str(workspace), session_id]
+            if progress:
+                progress(
+                    f"正在恢复 Codex 会话 {session_id}，将从第 {manifest['turn_count'] + 1} 轮继续记录"
+                )
+            try:
+                process = subprocess.Popen(command, cwd=workspace)
+                return_code = process.wait()
+            except FileNotFoundError as exc:
+                raise LauncherError(f"Codex executable not found: {codex_bin}") from exc
+            finally:
+                recorder.request_stop()
+                recorder.join(timeout=10)
+            if recorder.is_alive():
+                raise LauncherError("Recorder did not stop cleanly")
+            if recorder.error:
+                manifest["state"] = "recorder_failed"
+                manifest["completed_at"] = utc_now()
+                atomic_json(recording_dir / "manifest.json", manifest)
+                raise LauncherError(f"Session recorder failed: {recorder.error}") from recorder.error
+            manifest = recorder.manifest
+        else:
+            settings_path = recording_dir / "claude-settings.json"
+            atomic_json(settings_path, build_claude_settings(workspace, recording_dir))
+            errors_path = recording_dir / "hook-errors.jsonl"
+            previous_error_size = errors_path.stat().st_size if errors_path.exists() else 0
+            command = [claude_bin, "--settings", str(settings_path), "--resume", session_id]
+            if progress:
+                progress(
+                    f"正在恢复 Claude Code 会话 {session_id}，将从第 {manifest['turn_count'] + 1} 轮继续记录"
+                )
+            try:
+                process = subprocess.Popen(command, cwd=workspace)
+                return_code = process.wait()
+            except FileNotFoundError as exc:
+                raise LauncherError(f"Claude Code executable not found: {claude_bin}") from exc
+            manifest = json.loads(
+                (recording_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            current_error_size = errors_path.stat().st_size if errors_path.exists() else 0
+            if current_error_size > previous_error_size:
+                manifest["state"] = "recorder_failed"
+                atomic_json(recording_dir / "manifest.json", manifest)
+                raise LauncherError(f"Claude Code recorder failed; see {errors_path}")
+
+        history = manifest.get("resume_history", [])
+        if isinstance(history, list) and history:
+            history[-1]["completed_at"] = utc_now()
+            history[-1]["exit_code"] = return_code
+            history[-1]["turn_count_after"] = manifest.get("turn_count", 0)
+        manifest["state"] = "completed" if return_code == 0 else f"{backend}_failed"
+        manifest["agent_exit_code"] = return_code
+        manifest[f"{'codex' if backend == 'codex' else 'claude_code'}_exit_code"] = return_code
+        manifest["completed_at"] = utc_now()
+        atomic_json(recording_dir / "manifest.json", manifest)
+        if progress:
+            progress(
+                f"{agent_name} 续标会话已结束，现共记录 {manifest.get('turn_count', 0)} 轮"
+            )
+        return return_code
 
 
 def launch_task(

@@ -51,6 +51,8 @@ def handle_claude_hook(workspace: Path, recording_dir: Path, event: dict) -> Non
         raise LauncherError("Claude hook event belongs to a different session")
 
     if event_name == "SessionStart":
+        if recorded_session_id and session_id != recorded_session_id:
+            raise LauncherError("Claude resumed a different session than requested")
         manifest["session_id"] = session_id
         manifest["session_log"] = event.get("transcript_path")
         if isinstance(event.get("model"), str):

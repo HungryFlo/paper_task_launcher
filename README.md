@@ -38,6 +38,12 @@ paper-task export \
   --output /absolute/path/to/exported-dataset
 ```
 
+如果会话中断，使用原任务目录恢复同一个模型会话：
+
+```bash
+paper-task resume --workspace /absolute/path/to/new-task
+```
+
 ## 中文快速开始
 
 首先克隆并安装启动器：
@@ -65,6 +71,17 @@ paper-task export \
   --workspace /absolute/path/to/new-task \
   --output /absolute/path/to/exported-dataset
 ```
+
+如果终端关闭、网络中断或用户主动退出，可以从断点恢复。启动器会自动读取最初选择的后端
+和会话 ID，因此续标时不需要、也不能重新指定论文或切换后端：
+
+```bash
+paper-task resume --workspace /absolute/path/to/new-task
+```
+
+续标会从最后一个成功记录的轮次继续追加，不会覆盖已有的对话或代码版本。中断发生在某轮
+回答完成之前时，当前工作区中的未提交改动会原样保留，并在下一次成功完成回答后进入新快照。
+同一个任务目录同时只能由一个 `paper-task resume` 进程打开。
 
 启动器在新会话第一轮发送给模型的初始提示词定义在
 [`PROMPT_TEMPLATE`](paper_task_launcher/launcher.py#L18-L34)，可以直接查看当前任务要求和项目规则。
@@ -124,6 +141,16 @@ Use `--prepare-only` to validate/import/init without opening the selected agent:
 ```bash
 paper-task --workspace /absolute/path/to/new-task --paper /path/to/latex --prepare-only
 ```
+
+Resume an interrupted recording with the same backend and session ID:
+
+```bash
+paper-task resume --workspace /absolute/path/to/new-task
+```
+
+Resume validates the manifest, transcript turn count, and latest Git snapshot before launching the
+agent. It appends new completed turns and preserves any in-progress workspace changes left by an
+interruption. A prepared-only task cannot be resumed because it has no agent session ID yet.
 
 ## Output
 

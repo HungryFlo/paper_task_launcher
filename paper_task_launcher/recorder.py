@@ -93,6 +93,8 @@ class SessionRecorder(threading.Thread):
         manifest: dict,
         launch_time: float,
         existing_logs: set[Path],
+        resume_session_id: str | None = None,
+        resume_offsets: dict[Path, int] | None = None,
         poll_interval: float = 0.2,
     ):
         super().__init__(name="paper-task-session-recorder", daemon=True)
@@ -102,16 +104,31 @@ class SessionRecorder(threading.Thread):
         self.manifest = manifest
         self.launch_time = launch_time
         self.existing_logs = existing_logs
+        self.resume_session_id = resume_session_id
+        self.resume_offsets = resume_offsets or {}
         self.poll_interval = poll_interval
         self.stop_requested = threading.Event()
         self.log_path: Path | None = None
         self.offset = 0
         self.partial = ""
         self.error: Exception | None = None
+        self.recorded_turn_ids: set[str] = set()
+        transcript_path = recording_dir / "transcript.jsonl"
+        if transcript_path.exists():
+            for line in transcript_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                existing_turn = json.loads(line)
+                turn_id = existing_turn.get("turn_id")
+                if isinstance(turn_id, str) and turn_id:
+                    self.recorded_turn_ids.add(turn_id)
         self.snapshots = SnapshotStore(workspace, recording_id)
-        baseline = manifest.get("baseline_snapshot")
-        if isinstance(baseline, dict) and isinstance(baseline.get("commit"), str):
-            self.snapshots.parent = baseline["commit"]
+        count = manifest.get("turn_count", 0)
+        if isinstance(count, int) and count >= 0:
+            self.snapshots.count = count
+        previous = manifest.get("latest_snapshot") or manifest.get("baseline_snapshot")
+        if isinstance(previous, dict) and isinstance(previous.get("commit"), str):
+            self.snapshots.parent = previous["commit"]
         self.parser = SessionEventParser(
             on_session=self._on_session,
             on_turn=self._on_turn,
@@ -133,14 +150,27 @@ class SessionRecorder(threading.Thread):
 
     def _candidate_matches(self, path: Path) -> bool:
         try:
-            if path in self.existing_logs or path.stat().st_mtime < self.launch_time - 1:
+            if path in self.existing_logs:
+                old_size = self.resume_offsets.get(path)
+                if old_size is None or path.stat().st_size <= old_size:
+                    return False
+            elif path.stat().st_mtime < self.launch_time - 1:
                 return False
             with path.open("r", encoding="utf-8", errors="replace") as handle:
                 first = handle.readline()
             record = json.loads(first)
             payload = record.get("payload", {})
             cwd = payload.get("cwd")
-            return record.get("type") == "session_meta" and cwd and Path(cwd).resolve() == self.workspace
+            session_id = payload.get("session_id") or payload.get("id")
+            return bool(
+                record.get("type") == "session_meta"
+                and cwd
+                and Path(cwd).resolve() == self.workspace
+                and (
+                    self.resume_session_id is None
+                    or session_id == self.resume_session_id
+                )
+            )
         except (OSError, ValueError, json.JSONDecodeError):
             return False
 
@@ -155,14 +185,20 @@ class SessionRecorder(threading.Thread):
         return candidates[0]
 
     def _on_session(self, payload: dict) -> None:
-        self.manifest["session_id"] = payload.get("session_id") or payload.get("id")
+        session_id = payload.get("session_id") or payload.get("id")
+        if self.resume_session_id and session_id != self.resume_session_id:
+            raise ValueError("Codex session log belongs to a different session")
+        self.manifest["session_id"] = session_id
         self.manifest["codex_cli_version"] = payload.get("cli_version")
         self.manifest["session_log"] = str(self.log_path) if self.log_path else None
         atomic_json(self.recording_dir / "manifest.json", self.manifest)
 
     def _on_turn(self, turn: dict) -> None:
+        turn_id = turn.get("turn_id")
+        if isinstance(turn_id, str) and turn_id in self.recorded_turn_ids:
+            return
         snapshot = self.snapshots.capture(
-            f"turn-{self.snapshots.count + 1:04d}", turn_id=turn.get("turn_id")
+            f"turn-{self.snapshots.count + 1:04d}", turn_id=turn_id
         )
         turn["turn_index"] = self.snapshots.count
         turn["snapshot"] = snapshot
@@ -171,6 +207,8 @@ class SessionRecorder(threading.Thread):
         append_jsonl(self.recording_dir / "snapshots.jsonl", snapshot)
         self.manifest["turn_count"] = self.snapshots.count
         self.manifest["latest_snapshot"] = snapshot
+        if isinstance(turn_id, str) and turn_id:
+            self.recorded_turn_ids.add(turn_id)
         atomic_json(self.recording_dir / "manifest.json", self.manifest)
 
     def _consume(self) -> None:
@@ -192,11 +230,16 @@ class SessionRecorder(threading.Thread):
             except json.JSONDecodeError:
                 continue
             self.parser.feed(record)
+        if not self.partial:
+            self.manifest["session_log_offset"] = self.offset
+            atomic_json(self.recording_dir / "manifest.json", self.manifest)
 
     def run(self) -> None:
         try:
             while self.log_path is None and not self.stop_requested.is_set():
                 self.log_path = self._discover()
+                if self.log_path is not None:
+                    self.offset = self.resume_offsets.get(self.log_path, 0)
                 if self.log_path is None:
                     time.sleep(self.poll_interval)
             while self.log_path is not None and not self.stop_requested.is_set():
@@ -205,6 +248,8 @@ class SessionRecorder(threading.Thread):
             if self.log_path is None:
                 # A very short-lived Codex invocation can exit before the discovery poll.
                 self.log_path = self._discover()
+                if self.log_path is not None:
+                    self.offset = self.resume_offsets.get(self.log_path, 0)
             if self.log_path is not None:
                 self._consume()
         except Exception as exc:
