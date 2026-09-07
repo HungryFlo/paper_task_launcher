@@ -17,23 +17,15 @@ from .paper import PaperMetadata, import_paper
 from .recorder import SessionRecorder
 from .util import append_jsonl, atomic_json, run_checked, utc_now
 
-PROMPT_TEMPLATE_VERSION = "paper-learning-web-v4"
-PROMPT_TEMPLATE = """你正在一个新建、隔离且独立的 Git 仓库中完成论文学习网站任务。
+PROMPT_TEMPLATE_VERSION = "paper-learning-web-v5-pdf"
+PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompt" / "paper_learning_web.txt"
 
-论文 LaTeX 源码已经导入到：./paper-source/
-论文标识：{paper_identity}
-论文源码 SHA-256：{paper_sha256}
 
-任务：创建一个前端网页，辅助用户阅读、理解和学习这一整篇论文。网页应对论文信息保持高覆盖率，尽量不遗漏论文中的内容与细节，以满足读者深入学习的需求；并以对用户友好的渐进信息展现方式帮助用户学习。
-
-项目规则：
-1. 开始实现前先完整阅读论文源码，网页内容应以论文为依据。
-2. ./paper-source/ 仅供读取；不要修改，也不要将其纳入 Git。
-3. 项目实现、测试、配置、资源和文档应写在当前仓库的其他位置。
-4. 如需使用论文中的图片，将副本放入项目资源目录并注明来源。
-
-请开始执行任务。
-"""
+def _load_prompt_template() -> str:
+    try:
+        return PROMPT_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise LauncherError(f"Unable to read prompt template: {PROMPT_PATH}: {exc}") from exc
 
 
 def validate_empty_workspace(value: str) -> Path:
@@ -58,7 +50,7 @@ def validate_empty_workspace(value: str) -> Path:
 
 def render_prompt(paper: PaperMetadata) -> str:
     identity = paper.arxiv_id or paper.title or paper.input
-    return PROMPT_TEMPLATE.format(
+    return _load_prompt_template().format(
         paper_identity=identity,
         paper_sha256=paper.source_sha256,
     )

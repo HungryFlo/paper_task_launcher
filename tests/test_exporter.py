@@ -41,7 +41,7 @@ class ExporterTests(unittest.TestCase):
             output = root / "dataset"
             result = export_dataset(str(workspace), str(output), progress=None)
 
-            self.assertEqual(result, output)
+            self.assertEqual(result, output.resolve())
             dataset = json.loads((output / "dataset.json").read_text())
             self.assertEqual(dataset["schema"], "paper-task-dataset-v1")
             self.assertEqual(dataset["backend"], "codex")
@@ -70,6 +70,70 @@ class ExporterTests(unittest.TestCase):
             (output / "keep.txt").write_text("keep", encoding="utf-8")
             with self.assertRaises(LauncherError):
                 export_dataset(str(workspace), str(output), progress=None)
+
+    def test_refuses_turn_without_required_conversation_content(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = root / "paper"
+            paper.mkdir()
+            (paper / "main.tex").write_text("paper", encoding="utf-8")
+            workspace = root / "task"
+            task = prepare_task(str(workspace), str(paper), progress=None)
+
+            snapshots = SnapshotStore(workspace, task.recording_id)
+            snapshots.parent = task.manifest["baseline_snapshot"]["commit"]
+            first = snapshots.capture("turn-0001", turn_id="remote-turn-1")
+            append_jsonl(
+                workspace / ".recording" / "transcript.jsonl",
+                {
+                    "turn_id": "remote-turn-1",
+                    "turn_index": 1,
+                    "user_input": "",
+                    "final_response": "answer",
+                    "snapshot": first,
+                },
+            )
+            task.manifest["turn_count"] = 1
+            task.manifest["latest_snapshot"] = first
+            atomic_json(workspace / ".recording" / "manifest.json", task.manifest)
+
+            with self.assertRaisesRegex(
+                LauncherError, r"turn 1 \(user_input\).*incomplete dataset"
+            ):
+                export_dataset(str(workspace), str(root / "dataset"), progress=None)
+            self.assertFalse((root / "dataset").exists())
+
+    def test_exports_turn_with_explicitly_empty_final_response(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = root / "paper"
+            paper.mkdir()
+            (paper / "main.tex").write_text("paper", encoding="utf-8")
+            workspace = root / "task"
+            task = prepare_task(str(workspace), str(paper), progress=None)
+
+            snapshots = SnapshotStore(workspace, task.recording_id)
+            snapshots.parent = task.manifest["baseline_snapshot"]["commit"]
+            first = snapshots.capture("turn-0001", turn_id="interrupted-turn")
+            append_jsonl(
+                workspace / ".recording" / "transcript.jsonl",
+                {
+                    "turn_id": "interrupted-turn",
+                    "turn_index": 1,
+                    "user_input": "continue",
+                    "final_response": "",
+                    "snapshot": first,
+                },
+            )
+            task.manifest["turn_count"] = 1
+            task.manifest["latest_snapshot"] = first
+            atomic_json(workspace / ".recording" / "manifest.json", task.manifest)
+
+            output = export_dataset(
+                str(workspace), str(root / "dataset"), progress=None
+            )
+            exported = json.loads((output / "turns.jsonl").read_text())
+            self.assertEqual(exported["final_response"], "")
 
 
 if __name__ == "__main__":

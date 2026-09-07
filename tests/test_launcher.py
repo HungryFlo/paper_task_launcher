@@ -111,7 +111,7 @@ time.sleep(0.4)
             ]
             self.assertEqual(len(transcript), 1)
             self.assertEqual(transcript[0]["final_response"], "done")
-            self.assertIn("论文 LaTeX 源码", transcript[0]["user_input"])
+            self.assertIn("论文文件", transcript[0]["user_input"])
             self.assertIn("前端网页", transcript[0]["user_input"])
             self.assertIn("对用户友好", transcript[0]["user_input"])
             self.assertIn("高覆盖率", transcript[0]["user_input"])
@@ -207,7 +207,7 @@ subprocess.run([hook['command'], *hook['args']], input=json.dumps(stop), text=Tr
             transcript = json.loads(
                 (workspace / ".recording" / "transcript.jsonl").read_text()
             )
-            self.assertIn("论文 LaTeX 源码", transcript["user_input"])
+            self.assertIn("论文文件", transcript["user_input"])
             self.assertEqual(transcript["final_response"], "claude done")
             manifest = json.loads(
                 (workspace / ".recording" / "manifest.json").read_text()

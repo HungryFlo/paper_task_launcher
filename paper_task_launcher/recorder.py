@@ -38,6 +38,13 @@ class SessionEventParser:
         self.current_turn: str | None = None
         self.fallback_user: str | None = None
 
+    def _remember_user(self, text: str, turn_id: object = None) -> None:
+        resolved_turn_id = turn_id or self.current_turn
+        if resolved_turn_id:
+            self.pending_users[str(resolved_turn_id)] = text
+        else:
+            self.fallback_user = text
+
     def feed(self, record: dict) -> None:
         record_type = record.get("type")
         payload = record.get("payload")
@@ -52,16 +59,22 @@ class SessionEventParser:
         if event_type == "task_started":
             self.current_turn = payload.get("turn_id")
             return
+        # Codex CLI 0.144 and newer emits user prompts directly as an
+        # event_msg/user_message record. These records currently have no
+        # turn_id, so associate them with the preceding task_started event.
+        if event_type == "user_message":
+            message = payload.get("message")
+            if isinstance(message, str):
+                self._remember_user(message, payload.get("turn_id"))
+            return
+        # Keep accepting the older Codex event schema for existing installs
+        # and recorded fixtures.
         if event_type == "item_completed":
             item = payload.get("item")
             if not isinstance(item, dict) or item.get("type") != "UserMessage":
                 return
             text = content_text(item.get("content"))
-            turn_id = payload.get("turn_id") or self.current_turn
-            if turn_id:
-                self.pending_users[str(turn_id)] = text
-            else:
-                self.fallback_user = text
+            self._remember_user(text, payload.get("turn_id"))
             return
         if event_type != "task_complete":
             return

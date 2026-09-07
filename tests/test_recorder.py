@@ -45,7 +45,39 @@ class RecorderParserTests(unittest.TestCase):
         self.assertEqual(turns[0]["user_input"], "question")
         self.assertEqual(turns[0]["final_response"], "final answer")
 
+    def test_extracts_new_user_message_event(self):
+        turns = []
+        parser = SessionEventParser(on_session=lambda payload: None, on_turn=turns.append)
+        parser.feed(
+            {
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "t-new"},
+            }
+        )
+        parser.feed(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "new schema question",
+                },
+            }
+        )
+        parser.feed(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "t-new",
+                    "last_agent_message": "new schema answer",
+                },
+            }
+        )
+
+        self.assertEqual(turns[0]["turn_id"], "t-new")
+        self.assertEqual(turns[0]["user_input"], "new schema question")
+        self.assertEqual(turns[0]["final_response"], "new schema answer")
+
 
 if __name__ == "__main__":
     unittest.main()
-

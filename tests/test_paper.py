@@ -72,6 +72,18 @@ class PaperTests(unittest.TestCase):
             self.assertTrue((destination / "main.tex").exists())
             self.assertFalse((destination / ".git").exists())
 
+    def test_local_pdf_import(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "paper.pdf"
+            destination = root / "destination"
+            source.write_bytes(b"%PDF-1.7\nminimal test PDF")
+            metadata = import_paper(str(source), destination)
+            self.assertEqual(metadata.kind, "local_pdf")
+            self.assertEqual(metadata.file_count, 1)
+            self.assertEqual(metadata.source_sha256, metadata.input_pdf_sha256)
+            self.assertEqual((destination / "paper.pdf").read_bytes(), source.read_bytes())
+
     def test_local_import_rejects_symlink(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

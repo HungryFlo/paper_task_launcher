@@ -12,7 +12,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="paper-task",
         description=(
-            "Create an isolated Git repository, import a paper's LaTeX source, launch a new "
+            "Create an isolated Git repository, import a paper's PDF or LaTeX source, launch a new "
             "Codex or Claude Code session, and record final responses plus per-turn code snapshots."
         ),
         epilog=(
@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--paper",
         required=True,
-        help="Local LaTeX directory, arXiv ID/URL, or PDF URL",
+        help="Local PDF file, local LaTeX directory, arXiv ID/URL, or PDF URL",
     )
     parser.add_argument(
         "--backend",
@@ -52,7 +52,7 @@ def build_export_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-paper-source",
         action="store_true",
-        help="Do not copy the imported LaTeX source into the dataset",
+        help="Do not copy the imported paper source into the dataset",
     )
     return parser
 

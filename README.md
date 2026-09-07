@@ -1,7 +1,7 @@
 # Paper Task Launcher
 
 `paper-task` creates one isolated repository and one new interactive Codex or Claude Code session
-per paper-learning website task. It imports the paper's LaTeX source into an ignored
+per paper-learning website task. It imports the paper's PDF or LaTeX source into an ignored
 `paper-source/` directory, asks
 the selected coding agent to build a frontend that helps users read, understand, and learn the paper,
 and records only user messages, final model responses, and code snapshots for that session. The fixed
@@ -25,63 +25,111 @@ python3 -m pip install -e .
 
 ## Quick start
 
+The current Human Bench workflow uses the local PDFs in `data/`. Choose one PDF, create a separate
+empty workspace for it, and pass the PDF path to `--paper`:
+
 ```bash
-# 开始阅读
+# Start paper 4
 paper-task \
   --backend codex \
-  --workspace /absolute/path/to/new-task \
-  --paper /absolute/path/to/local-latex-source
+  --workspace ../workspace/4_paper \
+  --paper ./data/4.pdf
 
-# 导出数据
+# Resume the same workspace if the session was interrupted
+paper-task resume \
+  --workspace ../workspace/4_paper
+
+# Export the recorded conversation and per-turn web versions
 paper-task export \
-  --workspace /absolute/path/to/new-task \
-  --output /absolute/path/to/exported-dataset
-```
-
-如果会话中断，使用原任务目录恢复同一个模型会话：
-
-```bash
-paper-task resume --workspace /absolute/path/to/new-task
+  --workspace ../workspace/4_paper \
+  --output ../out/4_paper
 ```
 
 ## 中文快速开始
 
-首先克隆并安装启动器：
+本项目当前的目标是：依次完成 `data/` 目录中的 10 篇 PDF 论文，为每篇论文建立独立的
+Codex 会话和 workspace，最后导出用户输入、模型最终回复以及每轮结束后的完整 Web 版本。
+
+### 1. 安装
+
+在本目录下以可编辑模式安装：
 
 ```bash
-git clone https://github.com/HungryFlo/paper_task_launcher.git
-cd paper_task_launcher
 python3 -m pip install -e .
 ```
 
-为每篇论文新建一个独立任务目录，然后启动全新的论文阅读会话。默认后端是 Codex：
+### 2. 选择 PDF 并开始阅读
+
+PDF 位于：
+
+```text
+data/
+├── 4.pdf
+├── 10.pdf
+├── 15.pdf
+├── 26.pdf
+├── 52.pdf
+├── 85.pdf
+├── 100.pdf
+├── 128.pdf
+├── 184.pdf
+└── 202.pdf
+```
+
+以 `paper_task_launcher` 为当前目录，选择一篇 PDF，将它的相对路径传给 `--paper`。例如开始阅读
+`4.pdf`：
 
 ```bash
 paper-task \
   --backend codex \
-  --workspace /absolute/path/to/new-task \
-  --paper /absolute/path/to/local-latex-source
+  --workspace ../workspace/4_paper \
+  --paper ./data/4.pdf
 ```
 
-`--paper` 也可以接受 arXiv ID、arXiv 链接或 PDF 链接。任务完成并退出编码智能体后，将完整
-对话记录、论文源码以及每轮代码版本导出为便于后续处理的数据集：
+参数含义：
+
+- `--backend codex`：使用 Codex 完成论文阅读网页任务。
+- `--paper`：指定本次要阅读的 PDF。
+- `--workspace`：指定该论文的独立工作目录；第一次启动时，该目录必须不存在或为空目录。
+
+建议使用 `../workspace/<论文编号>_paper` 的命名方式，例如 `10.pdf` 对应
+`../workspace/10_paper`。一个 workspace 只对应一篇论文，不要为另一篇 PDF 重复使用。
+
+### 3. 恢复中断的会话
+
+如果终端关闭、网络中断或主动退出 Codex，使用原 workspace 恢复同一个会话：
+
+```bash
+paper-task resume \
+  --workspace ../workspace/4_paper
+```
+
+恢复时不要再传入 `--paper`；启动器会从 workspace 中读取原会话 ID 和后端。
+
+### 4. 导出数据
+
+任务完成并退出 Codex 后，导出该论文的对话记录、PDF 和每轮 Web 代码版本：
 
 ```bash
 paper-task export \
-  --workspace /absolute/path/to/new-task \
-  --output /absolute/path/to/exported-dataset
+  --workspace ../workspace/4_paper \
+  --output ../out/4_paper
 ```
 
-如果终端关闭、网络中断或用户主动退出，可以从断点恢复。启动器会自动读取最初选择的后端
-和会话 ID，因此续标时不需要、也不能重新指定论文或切换后端：
+建议输出目录使用 `../out/<论文编号>_paper`。`--output` 指定的目录必须不存在或为空目录；
+导出器不会覆盖已有数据。如果对话记录缺少可恢复的用户输入或必要字段，导出会报错，避免产生表面成功但内容不完整的数据集。
 
-```bash
-paper-task resume --workspace /absolute/path/to/new-task
+### 5. 完成 10 篇论文
+
+按以下顺序处理：
+
+```text
+4, 10, 15, 26, 52, 85, 100, 128, 184, 202
 ```
 
-续标会从最后一个成功记录的轮次继续追加，不会覆盖已有的对话或代码版本。中断发生在某轮
-回答完成之前时，当前工作区中的未提交改动会原样保留，并在下一次成功完成回答后进入新快照。
-同一个任务目录同时只能由一个 `paper-task resume` 进程打开。
+对每个编号重复“开始阅读 → 必要时恢复会话 → 导出数据”三个步骤。例如处理
+`10.pdf` 时，将上述命令中的 `4.pdf`、`../workspace/4_paper` 和 `../out/4_paper` 分别替换为
+`10.pdf`、`../workspace/10_paper` 和 `../out/10_paper`。
 
 启动器在新会话第一轮发送给模型的初始提示词定义在
 [`PROMPT_TEMPLATE`](paper_task_launcher/launcher.py#L18-L34)，可以直接查看当前任务要求和项目规则。
@@ -91,8 +139,8 @@ paper-task resume --workspace /absolute/path/to/new-task
 ```bash
 paper-task \
   --backend claude \
-  --workspace /absolute/path/to/new-task \
-  --paper 2401.01234
+  --workspace ../workspace/4_paper \
+  --paper ./data/4.pdf
 ```
 
 首次进入新工作目录时，请接受 Claude Code 显示的 workspace trust 提示，否则本次会话的
@@ -105,15 +153,15 @@ The workspace must be new or completely empty and must not be inside another Git
 
 ```bash
 paper-task \
-  --workspace /absolute/path/to/new-task \
-  --paper /absolute/path/to/local-latex-source
+  --workspace ../workspace/4_paper \
+  --paper ./data/4.pdf
 ```
 
 The paper may instead be an arXiv ID, arXiv abstract/PDF URL, or a PDF URL:
 
 ```bash
-paper-task --workspace /absolute/path/to/new-task --paper 2401.01234
-paper-task --workspace /absolute/path/to/new-task --paper https://arxiv.org/abs/2401.01234
+paper-task --workspace ../workspace/arxiv-paper --paper 2401.01234
+paper-task --workspace ../workspace/arxiv-paper --paper https://arxiv.org/abs/2401.01234
 ```
 
 The launcher prints progress while it validates the workspace, identifies the paper, downloads and
@@ -129,7 +177,7 @@ The defaults can be adjusted for a slow or proxied network:
 
 ```bash
 PAPER_TASK_NETWORK_TIMEOUT=60 PAPER_TASK_NETWORK_RETRIES=3 \
-  paper-task --workspace /absolute/path/to/new-task --paper 2401.01234
+  paper-task --workspace ../workspace/arxiv-paper --paper 2401.01234
 ```
 
 For a generic PDF URL, the launcher downloads the first page text, searches arXiv by title, and
@@ -139,13 +187,13 @@ papers.
 Use `--prepare-only` to validate/import/init without opening the selected agent:
 
 ```bash
-paper-task --workspace /absolute/path/to/new-task --paper /path/to/latex --prepare-only
+paper-task --workspace ../workspace/prepared-paper --paper ../local-latex-source --prepare-only
 ```
 
 Resume an interrupted recording with the same backend and session ID:
 
 ```bash
-paper-task resume --workspace /absolute/path/to/new-task
+paper-task resume --workspace ../workspace/4_paper
 ```
 
 Resume validates the manifest, transcript turn count, and latest Git snapshot before launching the
@@ -188,8 +236,8 @@ directory:
 
 ```bash
 paper-task export \
-  --workspace /absolute/path/to/task \
-  --output /absolute/path/to/exported-dataset
+  --workspace ../workspace/4_paper \
+  --output ../out/4_paper
 ```
 
 The result is self-contained and does not require the task repository's `.git` directory:
@@ -211,6 +259,13 @@ Each `turns.jsonl` record contains the user input, final model response, timesta
 snapshot metadata, and a relative `code_path`. The exporter verifies every commit before writing the
 dataset and refuses to overwrite a non-empty output directory. Use `--no-paper-source` when the
 downstream dataset should contain only conversation metadata and code versions.
+
+Export also refuses to create a dataset when there are no completed turns, when any turn has an
+empty/missing `user_input`, or when the `final_response` field is missing or malformed. An explicitly
+empty `final_response` is preserved because Codex records `last_agent_message: null` for some
+interrupted turns; the exporter does not invent content that was absent from the source session. The
+error identifies affected turns so an incompatible recording can be repaired instead of being
+mistaken for a complete dataset.
 
 ## Data and failure behavior
 

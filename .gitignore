@@ -9,3 +9,6 @@ dist/
 .venv/
 venv/
 .DS_Store
+/out/
+/workspace/
+/.recording/

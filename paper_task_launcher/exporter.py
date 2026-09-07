@@ -95,6 +95,41 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
         os.fsync(handle.fileno())
 
 
+def _validate_required_turn_content(turns: list[dict]) -> None:
+    if not turns:
+        raise LauncherError(
+            "Recording contains no completed turns; export was aborted to avoid creating "
+            "an incomplete dataset"
+        )
+
+    incomplete: list[str] = []
+    for position, turn in enumerate(turns, 1):
+        index = turn.get("turn_index")
+        label = f"turn {index}" if isinstance(index, int) else f"record {position}"
+        missing: list[str] = []
+        user_input = turn.get("user_input")
+        if not isinstance(user_input, str) or not user_input.strip():
+            missing.append("user_input")
+        # A completed Codex task may legitimately contain
+        # last_agent_message=null (for example, an interrupted turn). Keep
+        # that as an empty string instead of inventing a response. The field
+        # must still exist and have the expected type so parser/data loss is
+        # not silently exported.
+        if "final_response" not in turn or not isinstance(turn["final_response"], str):
+            missing.append("final_response")
+        if missing:
+            incomplete.append(f"{label} ({', '.join(missing)})")
+
+    if incomplete:
+        details = "; ".join(incomplete)
+        raise LauncherError(
+            "Recording is missing required conversation content: "
+            f"{details}. Export was aborted to avoid creating an incomplete dataset. "
+            "If this recording came from Codex, update paper-task and repair the recording "
+            "from its Codex session log or record the affected turns again."
+        )
+
+
 def export_dataset(
     workspace_value: str,
     output_value: str,
@@ -108,6 +143,7 @@ def export_dataset(
     recording_dir = workspace / ".recording"
     manifest = _load_json(recording_dir / "manifest.json")
     turns = _load_jsonl(recording_dir / "transcript.jsonl")
+    _validate_required_turn_content(turns)
     output = _validate_output(workspace, output_value)
 
     baseline = manifest.get("baseline_snapshot")

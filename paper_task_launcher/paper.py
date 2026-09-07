@@ -195,6 +195,27 @@ def _copy_local_source(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination, ignore=ignore)
 
 
+def _copy_local_pdf(source: Path, destination: Path) -> str:
+    """Copy a local PDF into paper-source and return its SHA-256."""
+    try:
+        with source.open("rb") as handle:
+            if handle.read(5) != b"%PDF-":
+                raise LauncherError(f"Local paper file is not a PDF: {source}")
+    except OSError as exc:
+        raise LauncherError(f"Unable to read local PDF: {source}: {exc}") from exc
+    destination.mkdir(parents=True, exist_ok=False)
+    target = destination / "paper.pdf"
+    digest = hashlib.sha256()
+    with source.open("rb") as input_file, target.open("wb") as output_file:
+        while True:
+            chunk = input_file.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            output_file.write(chunk)
+    return digest.hexdigest()
+
+
 def _safe_archive_path(name: str) -> Path:
     normalized = PurePosixPath(name)
     if normalized.is_absolute() or ".." in normalized.parts:
@@ -382,8 +403,26 @@ def import_paper(
 ) -> PaperMetadata:
     local = Path(source_value).expanduser()
     if local.exists():
+        if local.is_file():
+            if local.suffix.lower() != ".pdf":
+                raise LauncherError("A local paper file must be a PDF")
+            source = local.resolve()
+            if progress:
+                progress(f"正在复制本地 PDF：{source}")
+            digest = _copy_local_pdf(source, destination)
+            metadata = PaperMetadata(
+                input=str(source),
+                kind="local_pdf",
+                imported_at=utc_now(),
+                source_sha256=digest,
+                file_count=1,
+                input_pdf_sha256=digest,
+            )
+            if progress:
+                progress("本地 PDF 导入完成")
+            return metadata
         if not local.is_dir():
-            raise LauncherError("A local paper source must be a directory")
+            raise LauncherError("A local paper source must be a directory or PDF file")
         source = local.resolve()
         if progress:
             progress(f"正在复制本地 LaTeX 源码：{source}")
