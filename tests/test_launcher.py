@@ -8,11 +8,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from paper_task_launcher.errors import LauncherError
+from paper_task_launcher.exporter import export_dataset
 from paper_task_launcher.git_history import SnapshotStore
 from paper_task_launcher.launcher import (
     launch_task,
+    prepare_continuation_task,
     prepare_task,
     resume_task,
+    validate_continuation_workspace,
     validate_empty_workspace,
 )
 from paper_task_launcher.util import run_checked
@@ -57,6 +60,201 @@ class LauncherTests(unittest.TestCase):
                     prepare_task(str(workspace), "2608.15089")
             self.assertTrue(workspace.is_dir())
             self.assertEqual(list(workspace.iterdir()), [])
+
+    def test_prepare_continuation_captures_existing_web_as_baseline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = root / "paper.pdf"
+            paper.write_bytes(b"%PDF-1.4\nexisting web paper\n")
+            workspace = root / "existing-web"
+            workspace.mkdir()
+            (workspace / "index.html").write_text("before\n", encoding="utf-8")
+
+            task = prepare_continuation_task(
+                str(workspace), str(paper), progress=None
+            )
+
+            self.assertEqual(task.prompt, "")
+            self.assertEqual(task.manifest["task_mode"], "continue")
+            self.assertEqual(task.manifest["paper"]["kind"], "local_pdf")
+            self.assertIsNone(task.manifest["initial_prompt_path"])
+            self.assertFalse((workspace / ".recording" / "initial-prompt.md").exists())
+            self.assertEqual(
+                (workspace / "paper-source" / "paper.pdf").read_bytes(),
+                paper.read_bytes(),
+            )
+            baseline = task.manifest["baseline_snapshot"]["commit"]
+            self.assertEqual(
+                run_checked(["git", "show", f"{baseline}:index.html"], cwd=workspace),
+                "before",
+            )
+            self.assertEqual(run_checked(["git", "rev-parse", "HEAD"], cwd=workspace), baseline)
+            self.assertEqual(run_checked(["git", "status", "--porcelain"], cwd=workspace), "")
+            self.assertIn(
+                "/.recording/",
+                (workspace / ".git" / "info" / "exclude").read_text(),
+            )
+            self.assertIn(
+                "/paper-source/",
+                (workspace / ".git" / "info" / "exclude").read_text(),
+            )
+
+            with self.assertRaisesRegex(LauncherError, "paper-task resume"):
+                validate_continuation_workspace(str(workspace))
+
+    def test_continue_requires_paper_without_touching_existing_web(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "existing-web"
+            workspace.mkdir()
+            (workspace / "index.html").write_text("unchanged\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(LauncherError, "--paper is required"):
+                launch_task(
+                    str(workspace),
+                    None,
+                    continue_existing=True,
+                    prepare_only=True,
+                    progress=None,
+                )
+
+            self.assertEqual(
+                (workspace / "index.html").read_text(encoding="utf-8"),
+                "unchanged\n",
+            )
+            self.assertFalse((workspace / ".git").exists())
+            self.assertFalse((workspace / ".recording").exists())
+
+    def test_prepare_continuation_preserves_existing_git_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = root / "paper"
+            paper.mkdir()
+            (paper / "main.tex").write_text("paper\n", encoding="utf-8")
+            workspace = root / "existing-repository"
+            workspace.mkdir()
+            run_checked(["git", "init", "-b", "main", str(workspace)])
+            (workspace / "index.html").write_text("committed\n", encoding="utf-8")
+            run_checked(["git", "add", "index.html"], cwd=workspace)
+            run_checked(
+                [
+                    "git",
+                    "-c",
+                    "user.name=test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-m",
+                    "existing web",
+                ],
+                cwd=workspace,
+            )
+            (workspace / "index.html").write_text("working tree version\n", encoding="utf-8")
+            head_before = run_checked(["git", "rev-parse", "HEAD"], cwd=workspace)
+            status_before = run_checked(["git", "status", "--porcelain"], cwd=workspace)
+
+            task = prepare_continuation_task(
+                str(workspace), str(paper), progress=None
+            )
+
+            self.assertTrue(task.manifest["continued_workspace_had_git"])
+            self.assertEqual(
+                run_checked(["git", "rev-parse", "HEAD"], cwd=workspace), head_before
+            )
+            self.assertEqual(
+                run_checked(["git", "status", "--porcelain"], cwd=workspace),
+                status_before,
+            )
+            baseline = task.manifest["baseline_snapshot"]["commit"]
+            self.assertEqual(
+                run_checked(["git", "show", f"{baseline}:index.html"], cwd=workspace),
+                "working tree version",
+            )
+
+    def test_full_continuation_launch_does_not_send_generation_prompt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = root / "paper"
+            paper.mkdir()
+            (paper / "main.tex").write_text("paper\n", encoding="utf-8")
+            workspace = root / "existing-web"
+            workspace.mkdir()
+            (workspace / "index.html").write_text("before\n", encoding="utf-8")
+            codex_home = root / "codex-home"
+            fake = root / "fake-codex"
+            fake.write_text(
+                """#!/usr/bin/env python3
+import json, os, sys, time
+from pathlib import Path
+workspace = Path(sys.argv[sys.argv.index('--cd') + 1]).resolve()
+if sys.argv != [sys.argv[0], '--cd', str(workspace)]:
+    raise SystemExit('unexpected prompt or arguments: ' + repr(sys.argv))
+(workspace / 'index.html').write_text('after\\n')
+log = Path(os.environ['CODEX_HOME']) / 'sessions' / '2026' / '01' / '01' / 'rollout-continue.jsonl'
+log.parent.mkdir(parents=True, exist_ok=True)
+records = [
+  {'timestamp':'2026-01-01T00:00:00Z','type':'session_meta','payload':{'session_id':'session-continue','cwd':str(workspace),'cli_version':'test'}},
+  {'timestamp':'2026-01-01T00:00:01Z','type':'event_msg','payload':{'type':'task_started','turn_id':'turn-continue'}},
+  {'timestamp':'2026-01-01T00:00:02Z','type':'event_msg','payload':{'type':'user_message','message':'change the existing web'}},
+  {'timestamp':'2026-01-01T00:00:03Z','type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-continue','last_agent_message':'changed','completed_at':'2026-01-01T00:00:03Z'}},
+]
+with log.open('w') as handle:
+    for record in records:
+        handle.write(json.dumps(record) + '\\n')
+        handle.flush()
+time.sleep(0.4)
+""",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+
+            with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                code = launch_task(
+                    str(workspace),
+                    str(paper),
+                    continue_existing=True,
+                    codex_bin=str(fake),
+                    progress=None,
+                )
+
+            self.assertEqual(code, 0)
+            transcript = json.loads(
+                (workspace / ".recording" / "transcript.jsonl").read_text()
+            )
+            self.assertEqual(transcript["user_input"], "change the existing web")
+            self.assertEqual(transcript["final_response"], "changed")
+            baseline = json.loads(
+                (workspace / ".recording" / "manifest.json").read_text()
+            )["baseline_snapshot"]["commit"]
+            self.assertEqual(
+                run_checked(["git", "show", f"{baseline}:index.html"], cwd=workspace),
+                "before",
+            )
+            self.assertEqual(
+                run_checked(
+                    ["git", "show", f"{transcript['snapshot']['commit']}:index.html"],
+                    cwd=workspace,
+                ),
+                "after",
+            )
+
+            output = export_dataset(
+                str(workspace), str(root / "exported"), progress=None
+            )
+            dataset = json.loads((output / "dataset.json").read_text())
+            self.assertEqual(dataset["paper"]["kind"], "local_latex_directory")
+            self.assertIsNone(dataset["paths"]["initial_prompt"])
+            self.assertEqual(dataset["paths"]["paper_source"], "paper-source")
+            self.assertEqual(
+                (output / "paper-source" / "main.tex").read_text(), "paper\n"
+            )
+            self.assertEqual(
+                (output / "versions" / "baseline" / "index.html").read_text(),
+                "before\n",
+            )
+            self.assertEqual(
+                (output / "versions" / "turn-0001" / "index.html").read_text(),
+                "after\n",
+            )
 
     def test_full_launch_with_fake_codex_session(self):
         with tempfile.TemporaryDirectory() as temporary:

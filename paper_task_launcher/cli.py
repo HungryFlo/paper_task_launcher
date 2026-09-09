@@ -20,11 +20,24 @@ def build_parser() -> argparse.ArgumentParser:
             "export it with: paper-task export --help"
         ),
     )
-    parser.add_argument("--workspace", required=True, help="New or empty task directory")
+    parser.add_argument(
+        "--workspace",
+        required=True,
+        help="New/empty task directory, or an existing web directory with --continue",
+    )
     parser.add_argument(
         "--paper",
         required=True,
         help="Local PDF file, local LaTeX directory, arXiv ID/URL, or PDF URL",
+    )
+    parser.add_argument(
+        "--continue",
+        dest="continue_existing",
+        action="store_true",
+        help=(
+            "Record modifications to an existing non-empty web workspace without "
+            "sending the paper-generation prompt"
+        ),
     )
     parser.add_argument(
         "--backend",
@@ -95,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
             codex_bin=args.codex_bin,
             claude_bin=args.claude_bin,
             prepare_only=args.prepare_only,
+            continue_existing=args.continue_existing,
         )
     except LauncherError as exc:
         print(f"paper-task: error: {exc}", file=sys.stderr)

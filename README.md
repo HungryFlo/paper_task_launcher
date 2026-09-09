@@ -7,6 +7,10 @@ the selected coding agent to build a frontend that helps users read, understand,
 and records only user messages, final model responses, and code snapshots for that session. The fixed
 task explicitly does not ask the model to implement the paper's algorithm or reproduce its experiments.
 
+It can also start a new recorded modification session from an already generated web workspace with
+`--continue`. In that mode, the selected paper is imported into `paper-source/`, the existing web is
+captured as the baseline, and no paper-generation prompt is sent to the agent.
+
 ## Requirements
 
 - Python 3.10+
@@ -38,6 +42,13 @@ paper-task \
 # Resume the same workspace if the session was interrupted
 paper-task resume \
   --workspace ../workspace/4_paper
+
+# Start a new recording from an existing web without a generation prompt
+paper-task \
+  --continue \
+  --backend codex \
+  --workspace ../workspace/existing_web \
+  --paper ./data/4.pdf
 
 # Export the recorded conversation and per-turn web versions
 paper-task export \
@@ -106,7 +117,60 @@ paper-task resume \
 
 恢复时不要再传入 `--paper`；启动器会从 workspace 中读取原会话 ID 和后端。
 
-### 4. 导出数据
+### 4. 从已有 Web 开始新的修改记录
+
+如果 workspace 中已经有一份生成完成的 Web，但还没有 `paper-task` 的录制数据，可以使用
+`--continue` 从它开始一次全新的修改会话：
+
+例如，开始前已有 Web 位于：
+
+```text
+../workspace/existing_web/
+├── index.html
+├── styles.css
+├── script.js
+└── assets/
+```
+
+在 `paper_task_launcher` 目录中运行：
+
+```bash
+paper-task \
+  --continue \
+  --backend codex \
+  --workspace ../workspace/existing_web \
+  --paper ./data/4.pdf
+```
+
+该模式会：
+
+- 要求 `--workspace` 已存在、非空，且包含待修改的 Web。
+- 仍然要求使用 `--paper` 指定论文，并将论文导入 workspace 中的 `paper-source/`。
+- 将当前 Web 完整记录为 `baseline`。
+- 启动新的 Codex 会话，由用户在会话中输入修改要求。
+- 不使用该论文生成 `initial-prompt.md`，也不向 Codex 发送论文建站 prompt。
+- 按普通模式记录每轮用户输入、模型最终回复和修改后的 Web 快照。
+
+会话结束后，可以像普通任务一样导出：
+
+```bash
+paper-task export \
+  --workspace ../workspace/existing_web \
+  --output ../out/existing_web
+```
+
+`--continue` 与 `resume` 的区别：
+
+- `--continue`：对一份尚未录制的已有 Web 开始新会话、新录制。
+- `resume`：恢复已经存在 `.recording/manifest.json` 的原会话。
+
+如果 workspace 已有 `.recording/`，程序会拒绝 `--continue` 并提示使用：
+
+```bash
+paper-task resume --workspace ../workspace/existing_web
+```
+
+### 5. 导出数据
 
 任务完成并退出 Codex 后，导出该论文的对话记录、PDF 和每轮 Web 代码版本：
 
@@ -119,7 +183,7 @@ paper-task export \
 建议输出目录使用 `../out/<论文编号>_paper`。`--output` 指定的目录必须不存在或为空目录；
 导出器不会覆盖已有数据。如果对话记录缺少可恢复的用户输入或必要字段，导出会报错，避免产生表面成功但内容不完整的数据集。
 
-### 5. 完成 10 篇论文
+### 6. 完成 10 篇论文
 
 按以下顺序处理：
 
@@ -156,6 +220,20 @@ paper-task \
   --workspace ../workspace/4_paper \
   --paper ./data/4.pdf
 ```
+
+To record changes to an existing web without sending the paper-generation prompt, use `--continue`
+and still specify the paper to import into `paper-source/`:
+
+```bash
+paper-task \
+  --continue \
+  --backend codex \
+  --workspace ../workspace/existing_web \
+  --paper ./data/4.pdf
+```
+
+The existing web becomes the baseline snapshot. The directory must be non-empty and must not
+already contain `.recording`; use `paper-task resume` for an existing recording.
 
 The paper may instead be an arXiv ID, arXiv abstract/PDF URL, or a PDF URL:
 

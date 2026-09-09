@@ -64,6 +64,141 @@ class PreparedTask:
         self.manifest = manifest
 
 
+def validate_continuation_workspace(value: str) -> tuple[Path, bool]:
+    """Validate an existing web workspace and report whether it owns a Git repo."""
+    workspace = Path(value).expanduser()
+    if not workspace.exists():
+        raise LauncherError(f"Continuation workspace does not exist: {workspace}")
+    if workspace.is_symlink():
+        raise LauncherError("Continuation workspace must not be a symbolic link")
+    if not workspace.is_dir():
+        raise LauncherError("Continuation workspace must be a directory")
+    if not any(entry.name != ".git" for entry in workspace.iterdir()):
+        raise LauncherError(f"Continuation workspace is empty: {workspace}")
+    workspace = workspace.resolve()
+    if (workspace / ".recording").exists():
+        raise LauncherError(
+            "This workspace already has a paper-task recording; use "
+            "'paper-task resume --workspace ...' instead of --continue"
+        )
+
+    try:
+        git_root = Path(
+            run_checked(["git", "-C", str(workspace), "rev-parse", "--show-toplevel"])
+        ).resolve()
+    except LauncherError:
+        return workspace, False
+    if git_root != workspace:
+        raise LauncherError(
+            "Continuation workspace must not be nested inside another Git working tree"
+        )
+    if not (workspace / ".git").is_dir():
+        raise LauncherError(
+            "Continuation workspace must be a normal Git repository, not a linked worktree"
+        )
+    return workspace, True
+
+
+def _exclude_launcher_data_from_repository(workspace: Path) -> None:
+    exclude_path = workspace / ".git" / "info" / "exclude"
+    try:
+        existing = exclude_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        existing = ""
+    except OSError as exc:
+        raise LauncherError(f"Unable to read Git exclude file: {exclude_path}: {exc}") from exc
+    required_patterns = ("/.recording/", "/paper-source/")
+    existing_patterns = {line.strip() for line in existing.splitlines()}
+    missing_patterns = [
+        pattern for pattern in required_patterns if pattern not in existing_patterns
+    ]
+    if not missing_patterns:
+        return
+    separator = "" if not existing or existing.endswith("\n") else "\n"
+    addition = "".join(pattern + "\n" for pattern in missing_patterns)
+    try:
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        exclude_path.write_text(
+            existing + separator + addition,
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise LauncherError(f"Unable to update Git exclude file: {exclude_path}: {exc}") from exc
+
+
+def prepare_continuation_task(
+    workspace_value: str,
+    paper_value: str,
+    *,
+    backend: str = "codex",
+    progress: Callable[[str], None] | None = None,
+) -> PreparedTask:
+    if progress:
+        progress("正在检查已有 Web 工作目录…")
+    workspace, had_git_repository = validate_continuation_workspace(workspace_value)
+    recording_id = f"rec-{uuid.uuid4()}"
+    recording_dir = workspace / ".recording"
+    paper_dir = workspace / "paper-source"
+    if paper_dir.exists():
+        raise LauncherError(
+            "Continuation workspace already contains paper-source; move or remove it "
+            "before starting a new recording"
+        )
+    created_git_repository = False
+    try:
+        if not had_git_repository:
+            if progress:
+                progress("正在为已有 Web 初始化独立 Git 仓库…")
+            run_checked(["git", "init", "-b", "main", str(workspace)])
+            created_git_repository = True
+        _exclude_launcher_data_from_repository(workspace)
+        recording_dir.mkdir()
+        if progress:
+            progress("正在导入论文源文件…")
+        paper = import_paper(paper_value, paper_dir, progress=progress)
+
+        baseline_store = SnapshotStore(workspace, recording_id)
+        baseline = baseline_store.capture("baseline", ref_name="baseline", advance=False)
+        if created_git_repository:
+            # Make the imported existing web the clean initial state of the
+            # repository we just created. This affects only Git metadata and
+            # lets the coding agent inspect subsequent edits with git diff.
+            run_checked(
+                ["git", "update-ref", "refs/heads/main", baseline["commit"]],
+                cwd=workspace,
+            )
+            run_checked(["git", "read-tree", baseline["commit"]], cwd=workspace)
+        manifest = {
+            "schema_version": 1,
+            "recording_id": recording_id,
+            "backend": backend,
+            "task_mode": "continue",
+            "state": "prepared",
+            "created_at": utc_now(),
+            "workspace": str(workspace),
+            "paper": paper.to_dict(),
+            "prompt_template_version": None,
+            "initial_prompt_path": None,
+            "session_id": None,
+            "turn_count": 0,
+            "baseline_snapshot": baseline,
+            "continued_workspace_had_git": had_git_repository,
+        }
+        atomic_json(recording_dir / "manifest.json", manifest)
+        append_jsonl(recording_dir / "snapshots.jsonl", baseline)
+        if progress:
+            progress("已将现有 Web 记录为基线；未生成或发送论文建站 prompt")
+        return PreparedTask(workspace, recording_id, "", manifest)
+    except Exception:
+        if recording_dir.is_dir():
+            shutil.rmtree(recording_dir)
+        if paper_dir.is_dir():
+            shutil.rmtree(paper_dir)
+        if created_git_repository and (workspace / ".git").is_dir():
+            shutil.rmtree(workspace / ".git")
+        raise
+
+
 def _cleanup_failed_preparation(workspace: Path) -> None:
     for name in (".recording", "paper-source", ".git", ".gitignore"):
         target = workspace / name
@@ -328,12 +463,13 @@ def resume_task(
 
 def launch_task(
     workspace_value: str,
-    paper_value: str,
+    paper_value: str | None = None,
     *,
     backend: str = "codex",
     codex_bin: str = "codex",
     claude_bin: str = "claude",
     prepare_only: bool = False,
+    continue_existing: bool = False,
     progress: Callable[[str], None] | None = console_progress,
 ) -> int:
     if backend not in {"codex", "claude"}:
@@ -342,12 +478,22 @@ def launch_task(
     agent_name = "Codex" if backend == "codex" else "Claude Code"
     if shutil.which(agent_bin) is None and not prepare_only:
         raise LauncherError(f"{agent_name} executable not found: {agent_bin}")
-    task = prepare_task(
-        workspace_value,
-        paper_value,
-        backend=backend,
-        progress=progress,
-    )
+    if paper_value is None:
+        raise LauncherError("--paper is required")
+    if continue_existing:
+        task = prepare_continuation_task(
+            workspace_value,
+            paper_value,
+            backend=backend,
+            progress=progress,
+        )
+    else:
+        task = prepare_task(
+            workspace_value,
+            paper_value,
+            backend=backend,
+            progress=progress,
+        )
     recording_dir = task.workspace / ".recording"
     if prepare_only:
         task.manifest["state"] = "prepared"
@@ -373,9 +519,14 @@ def launch_task(
             existing_logs=existing_logs,
         )
         recorder.start()
-        command = [codex_bin, "--cd", str(task.workspace), task.prompt]
+        command = [codex_bin, "--cd", str(task.workspace)]
+        if not continue_existing:
+            command.append(task.prompt)
         if progress:
-            progress("正在启动新的 Codex 会话；后续可在会话中自由交互")
+            if continue_existing:
+                progress("正在启动 Codex 修改会话；请在会话中输入修改要求")
+            else:
+                progress("正在启动新的 Codex 会话；后续可在会话中自由交互")
         try:
             process = subprocess.Popen(command)
             return_code = process.wait()
@@ -395,9 +546,14 @@ def launch_task(
     else:
         settings_path = recording_dir / "claude-settings.json"
         atomic_json(settings_path, build_claude_settings(task.workspace, recording_dir))
-        command = [claude_bin, "--settings", str(settings_path), task.prompt]
+        command = [claude_bin, "--settings", str(settings_path)]
+        if not continue_existing:
+            command.append(task.prompt)
         if progress:
-            progress("正在启动新的 Claude Code 会话；后续可在会话中自由交互")
+            if continue_existing:
+                progress("正在启动 Claude Code 修改会话；请在会话中输入修改要求")
+            else:
+                progress("正在启动新的 Claude Code 会话；后续可在会话中自由交互")
         try:
             process = subprocess.Popen(command, cwd=task.workspace)
             return_code = process.wait()
