@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+.DS_Store
+# Local annotator inputs and generated task workspaces must never be uploaded.
+/data/*/
+/out/
+/workspace/
+/token_pool/*
+!/token_pool/.gitkeep
+/.recording/
+**/.recording/
+**/claude-config/
+**/codex-home/
+**/kimi-home/
+**/claude-settings.json
