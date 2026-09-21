@@ -10,7 +10,8 @@ dist/
 venv/
 .DS_Store
 # Local annotator inputs and generated task workspaces must never be uploaded.
-/data/*/
+/data/*
+!/data/.gitkeep
 /out/
 /workspace/
 /token_pool/*
