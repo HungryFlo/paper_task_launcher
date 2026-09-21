@@ -19,6 +19,38 @@
   - `--backend claude`：需要本地可执行 `claude` 命令。
   - `--backend kimi`：需要本地可执行 `kimi` 命令。
 
+在 macOS 或 Linux 上，可按需安装对应的 harness，不必同时安装三种。
+
+### Codex CLI
+
+```bash
+curl -fsSL https://chatgpt.com/codex/install.sh | sh
+```
+
+也可以通过 npm 安装：
+
+```bash
+npm install -g @openai/codex
+```
+
+官方文档：[Codex CLI](https://developers.openai.com/codex/cli/)
+
+### Claude Code
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+官方文档：[Install Claude Code](https://code.claude.com/docs/en/setup#install-claude-code)
+
+### Kimi Code
+
+```bash
+curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash
+```
+
+官方文档：[Kimi Code CLI Getting Started](https://moonshotai.github.io/kimi-code/en/guides/getting-started)
+
 可以使用以下命令检查本地环境：
 
 ```bash
@@ -28,8 +60,6 @@ codex --version
 claude --version
 kimi --version
 ```
-
-只需要检查你实际要使用的 harness，不必同时安装三种工具。
 
 ## 2. Install
 
@@ -66,7 +96,7 @@ token2=**
 
 token 探测会并发执行；第一个验证成功的 token 会立即被使用，其余探测会被终止。token 明文不会写入 workspace、快照或导出数据。
 
-`token_pool/` 已被 Git 忽略，不会上传到 GitHub。
+`token_pool/` 目录会保留在 GitHub，但除 `.gitkeep` 外的 token 文件都已被 Git 忽略，不会上传。
 
 ## 4. 开始执行
 
