@@ -11,8 +11,10 @@ venv/
 .DS_Store
 /out/
 /workspace/
-/token_pool/
-/data/papers/
+/token_pool/*
+!/token_pool/.gitkeep
+/data/papers/*.pdf
+/data/papers/*.PDF
 /.recording/
 **/.recording/
 **/claude-config/
