@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import tempfile
+from copy import deepcopy
 from pathlib import Path
 from typing import Callable
 
@@ -12,6 +13,25 @@ from .util import atomic_json, run_checked, utc_now
 
 
 EXPORT_SCHEMA = "paper-task-dataset-v1"
+
+
+def _export_manifest(manifest: dict) -> dict:
+    """Return export-safe recording metadata without local credential references."""
+    result = deepcopy(manifest)
+    provider = result.get("claude_provider")
+    if isinstance(provider, dict):
+        provider.pop("token_file", None)
+        provider.pop("last_selected_token_label", None)
+    provider = result.get("boyue_provider")
+    if isinstance(provider, dict):
+        provider.pop("token_file", None)
+        provider.pop("last_selected_token_label", None)
+    input_web = result.get("input_web")
+    if isinstance(input_web, dict):
+        input_web.pop("source_path", None)
+    for key in ("workspace", "session_log", "initial_prompt_path", "agent_config_dir"):
+        result.pop(key, None)
+    return result
 
 
 def _load_json(path: Path) -> dict:
@@ -47,8 +67,9 @@ def _load_jsonl(path: Path) -> list[dict]:
     return records
 
 
-def _validate_output(workspace: Path, output_value: str) -> Path:
-    output = Path(output_value).expanduser()
+def _validate_output(workspace: Path, output_value: str | None) -> Path:
+    default_output = (workspace / "out_data").resolve()
+    output = Path(output_value).expanduser() if output_value else default_output
     if output.exists():
         if output.is_symlink() or not output.is_dir():
             raise LauncherError(f"Export output must be a directory: {output}")
@@ -62,7 +83,10 @@ def _validate_output(workspace: Path, output_value: str) -> Path:
     except ValueError:
         pass
     else:
-        raise LauncherError("Export output must be outside the task workspace")
+        if output != default_output:
+            raise LauncherError(
+                "Export output inside the task workspace must be its out_data directory"
+            )
     return output
 
 
@@ -132,7 +156,7 @@ def _validate_required_turn_content(turns: list[dict]) -> None:
 
 def export_dataset(
     workspace_value: str,
-    output_value: str,
+    output_value: str | None = None,
     *,
     include_paper_source: bool = True,
     progress: Callable[[str], None] | None = None,
@@ -142,9 +166,9 @@ def export_dataset(
         raise LauncherError(f"Task workspace is not a Git repository: {workspace}")
     recording_dir = workspace / ".recording"
     manifest = _load_json(recording_dir / "manifest.json")
+    output = _validate_output(workspace, output_value)
     turns = _load_jsonl(recording_dir / "transcript.jsonl")
     _validate_required_turn_content(turns)
-    output = _validate_output(workspace, output_value)
 
     baseline = manifest.get("baseline_snapshot")
     if not isinstance(baseline, dict) or not isinstance(baseline.get("commit"), str):
@@ -174,7 +198,8 @@ def export_dataset(
             "Recording is inconsistent: manifest turn_count does not match transcript.jsonl"
         )
 
-    staging = Path(tempfile.mkdtemp(prefix=".paper-task-export-", dir=output.parent))
+    staging_parent = recording_dir if output == (workspace / "out_data") else output.parent
+    staging = Path(tempfile.mkdtemp(prefix=".paper-task-export-", dir=staging_parent))
     try:
         if progress:
             progress("正在校验并导出基线代码…")
@@ -199,7 +224,7 @@ def export_dataset(
         initial_prompt = recording_dir / "initial-prompt.md"
         if initial_prompt.is_file():
             shutil.copy2(initial_prompt, staging / "initial-prompt.md")
-        atomic_json(staging / "recording-manifest.json", manifest)
+        atomic_json(staging / "recording-manifest.json", _export_manifest(manifest))
         _write_jsonl(staging / "turns.jsonl", normalized_turns)
         dataset = {
             "schema": EXPORT_SCHEMA,
@@ -211,6 +236,8 @@ def export_dataset(
             "turn_count": len(normalized_turns),
             "paper": manifest.get("paper"),
             "prompt_template_version": manifest.get("prompt_template_version"),
+            "generated_model": manifest.get("generated_model"),
+            "modification_model": manifest.get("modification_model"),
             "baseline": {
                 "code_path": "versions/baseline",
                 "snapshot": baseline,

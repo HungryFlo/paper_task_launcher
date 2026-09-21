@@ -14,6 +14,40 @@ GIT_IDENTITY = {
     "GIT_COMMITTER_EMAIL": "paper-task-recorder@localhost",
 }
 
+WEB_EXCLUDED_DIRECTORIES = {
+    ".git",
+    ".recording",
+    ".claude",
+    ".codex",
+    ".kimi",
+    ".kimi-code",
+    "paper-source",
+    "node_modules",
+    "__pycache__",
+    ".cache",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "out_data",
+}
+WEB_EXCLUDED_FILES = {".npmrc", ".pypirc", ".DS_Store"}
+
+
+def is_safe_web_path(relative: Path, *, directory: bool = False) -> bool:
+    parts = relative.parts
+    if any(part in WEB_EXCLUDED_DIRECTORIES for part in parts):
+        return False
+    if directory:
+        return True
+    name = relative.name
+    if name in WEB_EXCLUDED_FILES:
+        return False
+    if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
+        return False
+    if name.lower().endswith((".pem", ".key", ".p12", ".pfx")):
+        return False
+    return True
+
 
 def _git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ.copy()
@@ -50,14 +84,49 @@ def initialize_repository(workspace: Path) -> None:
 class SnapshotStore:
     """Create Git commits on private refs without modifying HEAD or the normal index."""
 
-    def __init__(self, workspace: Path, recording_id: str):
+    def __init__(
+        self,
+        workspace: Path,
+        recording_id: str,
+        *,
+        snapshot_policy: str = "git",
+    ):
+        if snapshot_policy not in {"git", "web"}:
+            raise LauncherError(f"Unsupported snapshot policy: {snapshot_policy}")
         self.workspace = workspace
         self.recording_id = recording_id
+        self.snapshot_policy = snapshot_policy
         self.index_path = workspace / ".recording" / "snapshot.index"
         self.parent: str | None = None
         self.count = 0
 
+    def _web_snapshot_paths(self) -> list[str]:
+        paths: set[str] = set()
+        for current, directory_names, file_names in os.walk(
+            self.workspace, topdown=True, followlinks=False
+        ):
+            current_path = Path(current)
+            kept_directories: list[str] = []
+            for name in directory_names:
+                candidate = current_path / name
+                relative = candidate.relative_to(self.workspace)
+                if not is_safe_web_path(relative, directory=True):
+                    continue
+                if candidate.is_symlink():
+                    paths.add(relative.as_posix())
+                else:
+                    kept_directories.append(name)
+            directory_names[:] = kept_directories
+            for name in file_names:
+                candidate = current_path / name
+                relative = candidate.relative_to(self.workspace)
+                if is_safe_web_path(relative):
+                    paths.add(relative.as_posix())
+        return sorted(paths)
+
     def _snapshot_paths(self) -> list[str]:
+        if self.snapshot_policy == "web":
+            return self._web_snapshot_paths()
         tracked = run_checked(
             ["git", "ls-files", "--cached", "-z"], cwd=self.workspace
         ).split("\0")
@@ -72,6 +141,8 @@ class SnapshotStore:
             if relative == "paper-source" or relative.startswith("paper-source/"):
                 continue
             if relative == ".recording" or relative.startswith(".recording/"):
+                continue
+            if relative == "out_data" or relative.startswith("out_data/"):
                 continue
             candidate = self.workspace / relative
             if candidate.exists() or candidate.is_symlink():

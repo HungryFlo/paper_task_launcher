@@ -108,6 +108,7 @@ class SessionRecorder(threading.Thread):
         existing_logs: set[Path],
         resume_session_id: str | None = None,
         resume_offsets: dict[Path, int] | None = None,
+        sessions_root: Path | None = None,
         poll_interval: float = 0.2,
     ):
         super().__init__(name="paper-task-session-recorder", daemon=True)
@@ -119,6 +120,7 @@ class SessionRecorder(threading.Thread):
         self.existing_logs = existing_logs
         self.resume_session_id = resume_session_id
         self.resume_offsets = resume_offsets or {}
+        self._sessions_root = sessions_root
         self.poll_interval = poll_interval
         self.stop_requested = threading.Event()
         self.log_path: Path | None = None
@@ -135,7 +137,11 @@ class SessionRecorder(threading.Thread):
                 turn_id = existing_turn.get("turn_id")
                 if isinstance(turn_id, str) and turn_id:
                     self.recorded_turn_ids.add(turn_id)
-        self.snapshots = SnapshotStore(workspace, recording_id)
+        self.snapshots = SnapshotStore(
+            workspace,
+            recording_id,
+            snapshot_policy=str(manifest.get("snapshot_policy", "git")),
+        )
         count = manifest.get("turn_count", 0)
         if isinstance(count, int) and count >= 0:
             self.snapshots.count = count
@@ -148,14 +154,17 @@ class SessionRecorder(threading.Thread):
         )
 
     @staticmethod
-    def sessions_root() -> Path:
+    def default_sessions_root() -> Path:
         configured = os.environ.get("CODEX_HOME")
         root = Path(configured).expanduser() if configured else Path.home() / ".codex"
         return root / "sessions"
 
+    def sessions_root(self) -> Path:
+        return self._sessions_root or self.default_sessions_root()
+
     @classmethod
-    def current_logs(cls) -> set[Path]:
-        root = cls.sessions_root()
+    def current_logs(cls, sessions_root: Path | None = None) -> set[Path]:
+        root = sessions_root or cls.default_sessions_root()
         return set(root.rglob("*.jsonl")) if root.exists() else set()
 
     def request_stop(self) -> None:
@@ -214,6 +223,9 @@ class SessionRecorder(threading.Thread):
             f"turn-{self.snapshots.count + 1:04d}", turn_id=turn_id
         )
         turn["turn_index"] = self.snapshots.count
+        model = self.manifest.get("modification_model")
+        if isinstance(model, str) and model:
+            turn["model"] = model
         turn["snapshot"] = snapshot
         turn["recorded_at"] = utc_now()
         append_jsonl(self.recording_dir / "transcript.jsonl", turn)

@@ -92,7 +92,11 @@ def handle_claude_hook(workspace: Path, recording_dir: Path, event: dict) -> Non
     count = manifest.get("turn_count", 0)
     if not isinstance(count, int) or count < 0:
         raise LauncherError("Recording manifest has an invalid turn count")
-    snapshots = SnapshotStore(workspace, str(manifest.get("recording_id")))
+    snapshots = SnapshotStore(
+        workspace,
+        str(manifest.get("recording_id")),
+        snapshot_policy=str(manifest.get("snapshot_policy", "git")),
+    )
     snapshots.count = count
     previous = manifest.get("latest_snapshot") or manifest.get("baseline_snapshot")
     if not isinstance(previous, dict) or not isinstance(previous.get("commit"), str):
@@ -112,6 +116,9 @@ def handle_claude_hook(workspace: Path, recording_dir: Path, event: dict) -> Non
         "snapshot": snapshot,
         "recorded_at": completed_at,
     }
+    model = manifest.get("modification_model")
+    if isinstance(model, str) and model:
+        turn["model"] = model
     append_jsonl(recording_dir / "transcript.jsonl", turn)
     append_jsonl(recording_dir / "snapshots.jsonl", snapshot)
     manifest["session_id"] = session_id or manifest.get("session_id")

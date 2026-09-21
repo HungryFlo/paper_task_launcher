@@ -38,8 +38,8 @@ class ExporterTests(unittest.TestCase):
             task.manifest["latest_snapshot"] = first
             atomic_json(workspace / ".recording" / "manifest.json", task.manifest)
 
-            output = root / "dataset"
-            result = export_dataset(str(workspace), str(output), progress=None)
+            output = workspace / "out_data"
+            result = export_dataset(str(workspace), progress=None)
 
             self.assertEqual(result, output.resolve())
             dataset = json.loads((output / "dataset.json").read_text())
@@ -70,6 +70,19 @@ class ExporterTests(unittest.TestCase):
             (output / "keep.txt").write_text("keep", encoding="utf-8")
             with self.assertRaises(LauncherError):
                 export_dataset(str(workspace), str(output), progress=None)
+
+    def test_refuses_nonstandard_output_inside_workspace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = root / "paper"
+            paper.mkdir()
+            (paper / "main.tex").write_text("paper", encoding="utf-8")
+            workspace = root / "task"
+            prepare_task(str(workspace), str(paper), progress=None)
+            with self.assertRaisesRegex(LauncherError, "out_data"):
+                export_dataset(
+                    str(workspace), str(workspace / "another-output"), progress=None
+                )
 
     def test_refuses_turn_without_required_conversation_content(self):
         with tempfile.TemporaryDirectory() as temporary:

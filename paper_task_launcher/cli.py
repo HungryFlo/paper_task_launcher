@@ -13,7 +13,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="paper-task",
         description=(
             "Create an isolated Git repository, import a paper's PDF or LaTeX source, launch a new "
-            "Codex or Claude Code session, and record final responses plus per-turn code snapshots."
+            "Codex, Claude Code, or Kimi Code session, and record final responses plus per-turn "
+            "code snapshots."
         ),
         epilog=(
             "Resume an interrupted recording with: paper-task resume --help; "
@@ -23,7 +24,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workspace",
         required=True,
-        help="New/empty task directory, or an existing web directory with --continue",
+        help=(
+            "New/empty task directory for --web copy mode, or an existing web "
+            "directory for legacy in-place --continue mode"
+        ),
     )
     parser.add_argument(
         "--paper",
@@ -35,18 +39,49 @@ def build_parser() -> argparse.ArgumentParser:
         dest="continue_existing",
         action="store_true",
         help=(
-            "Record modifications to an existing non-empty web workspace without "
-            "sending the paper-generation prompt"
+            "Modify an existing Web without the generation prompt; combine with "
+            "--web to copy a source Web, or omit --web for legacy in-place mode"
         ),
     )
     parser.add_argument(
+        "--web",
+        help="Existing web directory to copy into a new task workspace as its baseline",
+    )
+    parser.add_argument(
         "--backend",
-        choices=("codex", "claude"),
+        choices=("codex", "claude", "kimi"),
         default="codex",
         help="Interactive coding agent to launch (default: codex)",
     )
     parser.add_argument("--codex-bin", default="codex", help="Codex CLI executable")
     parser.add_argument("--claude-bin", default="claude", help="Claude Code CLI executable")
+    parser.add_argument("--kimi-bin", default="kimi", help="Kimi Code CLI executable")
+    parser.add_argument(
+        "--claude-model",
+        help="Claude Code model name for managed token-file authentication",
+    )
+    parser.add_argument(
+        "--model",
+        help="Modification model to use with --web for Codex, Claude Code, or Kimi Code",
+    )
+    parser.add_argument(
+        "--token-file",
+        help=(
+            "File containing Boyue token candidates as NAME=value "
+            "(default: token_pool/.env.token in the project directory)"
+        ),
+    )
+    parser.add_argument(
+        "--boyue-url",
+        help=(
+            "Boyue API root URL for managed Claude, Codex, or Kimi authentication "
+            "(default for managed tasks: http://35.220.164.252:3888)"
+        ),
+    )
+    parser.add_argument(
+        "--claude-base-url",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--prepare-only",
         action="store_true",
@@ -61,7 +96,10 @@ def build_export_parser() -> argparse.ArgumentParser:
         description="Export a recorded task as a self-contained, analysis-ready dataset.",
     )
     parser.add_argument("--workspace", required=True, help="Recorded task directory")
-    parser.add_argument("--output", required=True, help="New or empty export directory")
+    parser.add_argument(
+        "--output",
+        help="New or empty export directory (default: <workspace>/out_data)",
+    )
     parser.add_argument(
         "--no-paper-source",
         action="store_true",
@@ -73,11 +111,12 @@ def build_export_parser() -> argparse.ArgumentParser:
 def build_resume_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="paper-task resume",
-        description="Resume the recorded Codex or Claude Code session in an existing task.",
+        description="Resume the recorded Codex, Claude Code, or Kimi Code session.",
     )
     parser.add_argument("--workspace", required=True, help="Existing recorded task directory")
     parser.add_argument("--codex-bin", default="codex", help="Codex CLI executable")
     parser.add_argument("--claude-bin", default="claude", help="Claude Code CLI executable")
+    parser.add_argument("--kimi-bin", default="kimi", help="Kimi Code CLI executable")
     return parser
 
 
@@ -99,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.workspace,
                 codex_bin=args.codex_bin,
                 claude_bin=args.claude_bin,
+                kimi_bin=args.kimi_bin,
             )
         args = build_parser().parse_args(arguments)
         return launch_task(
@@ -107,8 +147,15 @@ def main(argv: list[str] | None = None) -> int:
             backend=args.backend,
             codex_bin=args.codex_bin,
             claude_bin=args.claude_bin,
+            kimi_bin=args.kimi_bin,
             prepare_only=args.prepare_only,
             continue_existing=args.continue_existing,
+            web_source=args.web,
+            model=args.model,
+            claude_model=args.claude_model,
+            token_file=args.token_file,
+            boyue_url=args.boyue_url,
+            claude_base_url=args.claude_base_url,
         )
     except LauncherError as exc:
         print(f"paper-task: error: {exc}", file=sys.stderr)

@@ -11,4 +11,11 @@ venv/
 .DS_Store
 /out/
 /workspace/
+/token_pool/
+/data/papers/
 /.recording/
+**/.recording/
+**/claude-config/
+**/codex-home/
+**/kimi-home/
+**/claude-settings.json
