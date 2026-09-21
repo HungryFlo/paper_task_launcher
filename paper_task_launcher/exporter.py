@@ -29,6 +29,9 @@ def _export_manifest(manifest: dict) -> dict:
     input_web = result.get("input_web")
     if isinstance(input_web, dict):
         input_web.pop("source_path", None)
+    harness_state = result.get("harness_state")
+    if isinstance(harness_state, dict):
+        harness_state.pop("persistent_home", None)
     for key in ("workspace", "session_log", "initial_prompt_path", "agent_config_dir"):
         result.pop(key, None)
     return result
@@ -231,6 +234,8 @@ def export_dataset(
             "exported_at": utc_now(),
             "recording_id": manifest.get("recording_id"),
             "session_id": manifest.get("session_id"),
+            "paper_id": manifest.get("paper_id"),
+            "annotator": manifest.get("annotator"),
             "backend": manifest.get("backend", "codex"),
             "recording_state": manifest.get("state"),
             "turn_count": len(normalized_turns),

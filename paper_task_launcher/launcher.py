@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Callable
 
@@ -40,6 +40,7 @@ from .git_history import (
     is_inside_existing_worktree,
     is_safe_web_path,
 )
+from .harness_state import ManagedHarnessHome, recover_harness_home
 from .kimi_provider import (
     model_alias as kimi_model_alias,
     select_token as select_kimi_token,
@@ -49,6 +50,7 @@ from .kimi_provider import (
 from .kimi_recorder import KimiSessionRecorder
 from .paper import PaperMetadata, import_paper
 from .recorder import SessionRecorder
+from .task_locator import is_default_output_workspace
 from .util import append_jsonl, atomic_json, run_checked, sha256_file, utc_now
 
 PROMPT_TEMPLATE_VERSION = "paper-learning-web-v5-pdf"
@@ -68,6 +70,38 @@ def _agent_details(backend: str, codex_bin: str, claude_bin: str, kimi_bin: str)
     raise LauncherError(f"Unsupported backend: {backend}")
 
 
+def _record_harness_sync(
+    manifest: dict,
+    home: ManagedHarnessHome,
+    *,
+    backend: str,
+) -> None:
+    recorded_log = manifest.get("session_log")
+    if isinstance(recorded_log, str):
+        persisted_log = home.persistent_path_for(Path(recorded_log))
+        if persisted_log is not None:
+            manifest["session_log"] = str(persisted_log)
+    manifest["harness_state"] = {
+        "backend": backend,
+        "persistent_home": str(home.persistent_home),
+        "runtime_policy": "local-mirror",
+        "last_synced_at": utc_now(),
+    }
+
+
+def _runtime_session_log(
+    manifest: dict,
+    home: ManagedHarnessHome,
+) -> Path | None:
+    recorded_log = manifest.get("session_log")
+    if not isinstance(recorded_log, str):
+        return None
+    runtime_log = home.runtime_path_for(Path(recorded_log))
+    if runtime_log is None or not runtime_log.is_file():
+        return None
+    return runtime_log
+
+
 def _load_prompt_template() -> str:
     try:
         return PROMPT_PATH.read_text(encoding="utf-8")
@@ -77,7 +111,9 @@ def _load_prompt_template() -> str:
 
 def validate_empty_workspace(value: str, *, create: bool = True) -> Path:
     workspace = Path(value).expanduser()
-    if is_inside_existing_worktree(workspace):
+    if is_inside_existing_worktree(workspace) and not is_default_output_workspace(
+        workspace
+    ):
         raise LauncherError("Workspace must not be inside another Git working tree")
     if workspace.exists():
         if workspace.is_symlink():
@@ -597,6 +633,7 @@ def resume_task(
                 record_token_selection(legacy_claude_config, selected_token)
         if boyue_config is not None:
             config_dir = recording_dir / config_dir_name
+            recover_harness_home(config_dir)
             recorded_log = manifest.get("session_log")
             valid_local_log = False
             if isinstance(recorded_log, str):
@@ -632,173 +669,260 @@ def resume_task(
             process_env = None
             sessions_root = None
             command = [codex_bin, "resume", "--cd", str(workspace)]
+            harness_home = None
             if boyue_config is not None:
-                config_dir = recording_dir / "codex-home"
-                write_codex_config(config_dir, boyue_config, workspace=workspace)
-                assert selected_token is not None
-                process_env = codex_session_environment(
-                    boyue_config, selected_token.value, config_dir
+                persistent_home = recording_dir / "codex-home"
+                recover_harness_home(persistent_home)
+                write_codex_config(
+                    persistent_home, boyue_config, workspace=workspace
                 )
-                sessions_root = config_dir / "sessions"
-                command.extend(["--model", str(boyue_config["model"])])
-            command.append(session_id)
-            existing_logs = SessionRecorder.current_logs(sessions_root)
-            resume_offsets: dict[Path, int] = {}
-            recorded_log = manifest.get("session_log")
-            if isinstance(recorded_log, str):
-                log_path = Path(recorded_log)
-                if log_path.is_file():
+                home_context = ManagedHarnessHome(
+                    persistent_home,
+                    str(manifest["recording_id"]),
+                    require_mmap=True,
+                )
+            else:
+                home_context = nullcontext(None)
+            with home_context as harness_home:
+                if boyue_config is not None:
+                    assert harness_home is not None
+                    config_dir = harness_home.runtime_home
+                    write_codex_config(config_dir, boyue_config, workspace=workspace)
+                    assert selected_token is not None
+                    process_env = codex_session_environment(
+                        boyue_config, selected_token.value, config_dir
+                    )
+                    sessions_root = config_dir / "sessions"
+                    command.extend(["--model", str(boyue_config["model"])])
+                command.append(session_id)
+                existing_logs = SessionRecorder.current_logs(sessions_root)
+                resume_offsets: dict[Path, int] = {}
+                if harness_home is not None:
+                    log_path = _runtime_session_log(manifest, harness_home)
+                else:
+                    recorded_log = manifest.get("session_log")
+                    log_path = (
+                        Path(recorded_log)
+                        if isinstance(recorded_log, str)
+                        and Path(recorded_log).is_file()
+                        else None
+                    )
+                if log_path is not None:
                     saved_offset = manifest.get("session_log_offset", 0)
                     if not isinstance(saved_offset, int) or saved_offset < 0:
                         saved_offset = 0
-                    resume_offsets[log_path] = min(saved_offset, log_path.stat().st_size)
-            recorder = SessionRecorder(
-                workspace=workspace,
-                recording_dir=recording_dir,
-                recording_id=str(manifest["recording_id"]),
-                manifest=manifest,
-                launch_time=time.time(),
-                existing_logs=existing_logs,
-                resume_session_id=session_id,
-                resume_offsets=resume_offsets,
-                sessions_root=sessions_root,
-            )
-            recorder.start()
-            if progress:
-                progress(
-                    f"正在恢复 Codex 会话 {session_id}，将从第 {manifest['turn_count'] + 1} 轮继续记录"
+                    resume_offsets[log_path] = min(
+                        saved_offset, log_path.stat().st_size
+                    )
+                recorder = SessionRecorder(
+                    workspace=workspace,
+                    recording_dir=recording_dir,
+                    recording_id=str(manifest["recording_id"]),
+                    manifest=manifest,
+                    launch_time=time.time(),
+                    existing_logs=existing_logs,
+                    resume_session_id=session_id,
+                    resume_offsets=resume_offsets,
+                    sessions_root=sessions_root,
                 )
-            try:
-                if boyue_config is not None:
-                    with codex_forwarding_relay(
-                        str(boyue_config["api_base_url"])
-                    ) as relay:
-                        relay_command = [
-                            codex_bin,
-                            "--config",
-                            relay_config_override(relay.base_url),
-                            *command[1:],
-                        ]
+                recorder.start()
+                if progress:
+                    progress(
+                        f"正在恢复 Codex 会话 {session_id}，将从第 {manifest['turn_count'] + 1} 轮继续记录"
+                    )
+                try:
+                    if boyue_config is not None:
+                        with codex_forwarding_relay(
+                            str(boyue_config["api_base_url"])
+                        ) as relay:
+                            relay_command = [
+                                codex_bin,
+                                "--config",
+                                relay_config_override(relay.base_url),
+                                *command[1:],
+                            ]
+                            process = subprocess.Popen(
+                                relay_command, cwd=workspace, env=process_env
+                            )
+                            return_code = process.wait()
+                    else:
                         process = subprocess.Popen(
-                            relay_command, cwd=workspace, env=process_env
+                            command, cwd=workspace, env=process_env
                         )
                         return_code = process.wait()
-                else:
-                    process = subprocess.Popen(command, cwd=workspace, env=process_env)
-                    return_code = process.wait()
-            except FileNotFoundError as exc:
-                raise LauncherError(f"Codex executable not found: {codex_bin}") from exc
-            finally:
-                recorder.request_stop()
-                recorder.join(timeout=10)
-            if recorder.is_alive():
-                raise LauncherError("Recorder did not stop cleanly")
-            if recorder.error:
-                manifest["state"] = "recorder_failed"
-                manifest["completed_at"] = utc_now()
-                atomic_json(recording_dir / "manifest.json", manifest)
-                raise LauncherError(f"Session recorder failed: {recorder.error}") from recorder.error
-            manifest = recorder.manifest
+                except FileNotFoundError as exc:
+                    raise LauncherError(
+                        f"Codex executable not found: {codex_bin}"
+                    ) from exc
+                finally:
+                    recorder.request_stop()
+                    recorder.join(timeout=10)
+                if recorder.is_alive():
+                    raise LauncherError("Recorder did not stop cleanly")
+                if recorder.error:
+                    manifest["state"] = "recorder_failed"
+                    manifest["completed_at"] = utc_now()
+                    atomic_json(recording_dir / "manifest.json", manifest)
+                    raise LauncherError(
+                        f"Session recorder failed: {recorder.error}"
+                    ) from recorder.error
+                manifest = recorder.manifest
+            if harness_home is not None:
+                _record_harness_sync(manifest, harness_home, backend=backend)
         elif backend == "claude":
             active_claude_config = (
                 boyue_claude_config(boyue_config)
                 if boyue_config is not None
                 else legacy_claude_config
             )
+            harness_home = None
             if active_claude_config is not None:
-                config_dir = recording_dir / "claude-config"
-                settings_path = config_dir / "settings.json"
+                persistent_home = recording_dir / "claude-config"
+                recover_harness_home(persistent_home)
+                settings_path = persistent_home / "settings.json"
                 write_private_json(
                     settings_path, build_claude_settings(workspace, recording_dir)
                 )
-                assert selected_token is not None
-                process_env = claude_session_environment(
-                    active_claude_config, selected_token.value, config_dir
+                home_context = ManagedHarnessHome(
+                    persistent_home,
+                    str(manifest["recording_id"]),
                 )
-                command = [
-                    claude_bin,
-                    "--settings",
-                    str(settings_path),
-                    "--model",
-                    str(active_claude_config["model"]),
-                    "--resume",
-                    session_id,
-                ]
             else:
-                settings_path = recording_dir / "claude-settings.json"
-                atomic_json(settings_path, build_claude_settings(workspace, recording_dir))
-                process_env = None
-                command = [claude_bin, "--settings", str(settings_path), "--resume", session_id]
-            errors_path = recording_dir / "hook-errors.jsonl"
-            previous_error_size = errors_path.stat().st_size if errors_path.exists() else 0
-            if progress:
-                progress(
-                    f"正在恢复 Claude Code 会话 {session_id}，将从第 {manifest['turn_count'] + 1} 轮继续记录"
+                home_context = nullcontext(None)
+            with home_context as harness_home:
+                if active_claude_config is not None:
+                    assert harness_home is not None
+                    config_dir = harness_home.runtime_home
+                    settings_path = config_dir / "settings.json"
+                    write_private_json(
+                        settings_path,
+                        build_claude_settings(workspace, recording_dir),
+                    )
+                    assert selected_token is not None
+                    process_env = claude_session_environment(
+                        active_claude_config,
+                        selected_token.value,
+                        config_dir,
+                    )
+                    command = [
+                        claude_bin,
+                        "--settings",
+                        str(settings_path),
+                        "--model",
+                        str(active_claude_config["model"]),
+                        "--resume",
+                        session_id,
+                    ]
+                else:
+                    settings_path = recording_dir / "claude-settings.json"
+                    atomic_json(
+                        settings_path,
+                        build_claude_settings(workspace, recording_dir),
+                    )
+                    process_env = None
+                    command = [
+                        claude_bin,
+                        "--settings",
+                        str(settings_path),
+                        "--resume",
+                        session_id,
+                    ]
+                errors_path = recording_dir / "hook-errors.jsonl"
+                previous_error_size = (
+                    errors_path.stat().st_size if errors_path.exists() else 0
                 )
-            try:
-                process = subprocess.Popen(command, cwd=workspace, env=process_env)
-                return_code = process.wait()
-            except FileNotFoundError as exc:
-                raise LauncherError(f"Claude Code executable not found: {claude_bin}") from exc
-            manifest = json.loads(
-                (recording_dir / "manifest.json").read_text(encoding="utf-8")
-            )
-            current_error_size = errors_path.stat().st_size if errors_path.exists() else 0
-            if current_error_size > previous_error_size:
-                manifest["state"] = "recorder_failed"
-                atomic_json(recording_dir / "manifest.json", manifest)
-                raise LauncherError(f"Claude Code recorder failed; see {errors_path}")
+                if progress:
+                    progress(
+                        f"正在恢复 Claude Code 会话 {session_id}，将从第 {manifest['turn_count'] + 1} 轮继续记录"
+                    )
+                try:
+                    process = subprocess.Popen(
+                        command, cwd=workspace, env=process_env
+                    )
+                    return_code = process.wait()
+                except FileNotFoundError as exc:
+                    raise LauncherError(
+                        f"Claude Code executable not found: {claude_bin}"
+                    ) from exc
+                manifest = json.loads(
+                    (recording_dir / "manifest.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                current_error_size = (
+                    errors_path.stat().st_size if errors_path.exists() else 0
+                )
+                if current_error_size > previous_error_size:
+                    manifest["state"] = "recorder_failed"
+                    atomic_json(recording_dir / "manifest.json", manifest)
+                    raise LauncherError(
+                        f"Claude Code recorder failed; see {errors_path}"
+                    )
+            if harness_home is not None:
+                _record_harness_sync(manifest, harness_home, backend=backend)
         else:
             if boyue_config is None or selected_token is None:
                 raise LauncherError("Kimi recording has no valid Boyue configuration")
-            config_dir = recording_dir / "kimi-home"
-            write_kimi_config(config_dir, boyue_config)
-            process_env = kimi_session_environment(
-                boyue_config, selected_token.value, config_dir
-            )
-            saved_offset = manifest.get("session_log_offset", 0)
-            if not isinstance(saved_offset, int) or saved_offset < 0:
-                saved_offset = 0
-            recorder = KimiSessionRecorder(
-                workspace=workspace,
-                recording_dir=recording_dir,
-                recording_id=str(manifest["recording_id"]),
-                manifest=manifest,
-                config_dir=config_dir,
-                launch_time=time.time(),
-                resume_session_id=session_id,
-                resume_offset=saved_offset,
-            )
-            recorder.start()
-            command = [
-                kimi_bin,
-                "--session",
-                session_id,
-                "--model",
-                kimi_model_alias(boyue_config),
-            ]
-            if progress:
-                progress(
-                    f"正在恢复 Kimi Code 会话 {session_id}，"
-                    f"将从第 {manifest['turn_count'] + 1} 轮继续记录"
+            persistent_home = recording_dir / "kimi-home"
+            recover_harness_home(persistent_home)
+            write_kimi_config(persistent_home, boyue_config)
+            with ManagedHarnessHome(
+                persistent_home,
+                str(manifest["recording_id"]),
+            ) as harness_home:
+                config_dir = harness_home.runtime_home
+                write_kimi_config(config_dir, boyue_config)
+                process_env = kimi_session_environment(
+                    boyue_config, selected_token.value, config_dir
                 )
-            try:
-                process = subprocess.Popen(command, cwd=workspace, env=process_env)
-                return_code = process.wait()
-            except FileNotFoundError as exc:
-                raise LauncherError(f"Kimi Code executable not found: {kimi_bin}") from exc
-            finally:
-                recorder.request_stop()
-                recorder.join(timeout=10)
-            if recorder.is_alive():
-                raise LauncherError("Kimi recorder did not stop cleanly")
-            if recorder.error:
-                manifest["state"] = "recorder_failed"
-                atomic_json(recording_dir / "manifest.json", manifest)
-                raise LauncherError(
-                    f"Kimi session recorder failed: {recorder.error}"
-                ) from recorder.error
-            manifest = recorder.manifest
+                saved_offset = manifest.get("session_log_offset", 0)
+                if not isinstance(saved_offset, int) or saved_offset < 0:
+                    saved_offset = 0
+                recorder = KimiSessionRecorder(
+                    workspace=workspace,
+                    recording_dir=recording_dir,
+                    recording_id=str(manifest["recording_id"]),
+                    manifest=manifest,
+                    config_dir=config_dir,
+                    launch_time=time.time(),
+                    resume_session_id=session_id,
+                    resume_offset=saved_offset,
+                )
+                recorder.start()
+                command = [
+                    kimi_bin,
+                    "--session",
+                    session_id,
+                    "--model",
+                    kimi_model_alias(boyue_config),
+                ]
+                if progress:
+                    progress(
+                        f"正在恢复 Kimi Code 会话 {session_id}，"
+                        f"将从第 {manifest['turn_count'] + 1} 轮继续记录"
+                    )
+                try:
+                    process = subprocess.Popen(
+                        command, cwd=workspace, env=process_env
+                    )
+                    return_code = process.wait()
+                except FileNotFoundError as exc:
+                    raise LauncherError(
+                        f"Kimi Code executable not found: {kimi_bin}"
+                    ) from exc
+                finally:
+                    recorder.request_stop()
+                    recorder.join(timeout=10)
+                if recorder.is_alive():
+                    raise LauncherError("Kimi recorder did not stop cleanly")
+                if recorder.error:
+                    manifest["state"] = "recorder_failed"
+                    atomic_json(recording_dir / "manifest.json", manifest)
+                    raise LauncherError(
+                        f"Kimi session recorder failed: {recorder.error}"
+                    ) from recorder.error
+                manifest = recorder.manifest
+            _record_harness_sync(manifest, harness_home, backend=backend)
 
         history = manifest.get("resume_history", [])
         if isinstance(history, list) and history:
@@ -838,6 +962,8 @@ def launch_task(
     token_file: str | None = None,
     boyue_url: str | None = None,
     claude_base_url: str | None = None,
+    paper_id: str | None = None,
+    annotator: str | None = None,
     progress: Callable[[str], None] | None = console_progress,
 ) -> int:
     if backend not in {"codex", "claude", "kimi"}:
@@ -955,6 +1081,11 @@ def launch_task(
             progress=progress,
         )
     recording_dir = task.workspace / ".recording"
+    if paper_id is not None:
+        task.manifest["paper_id"] = paper_id
+        if annotator is not None:
+            task.manifest["annotator"] = annotator
+        atomic_json(recording_dir / "manifest.json", task.manifest)
     if boyue_config is not None:
         task.manifest["boyue_provider"] = boyue_config
         task.manifest["agent_config_dir"] = str(
@@ -996,169 +1127,249 @@ def launch_task(
         process_env = None
         sessions_root = None
         command = [codex_bin, "--cd", str(task.workspace)]
+        harness_home = None
         if boyue_config is not None:
-            config_dir = recording_dir / "codex-home"
-            write_codex_config(config_dir, boyue_config, workspace=task.workspace)
-            assert selected_token is not None
-            process_env = codex_session_environment(
-                boyue_config, selected_token.value, config_dir
+            persistent_home = recording_dir / "codex-home"
+            recover_harness_home(persistent_home)
+            write_codex_config(
+                persistent_home, boyue_config, workspace=task.workspace
             )
-            sessions_root = config_dir / "sessions"
-            command.extend(["--model", str(boyue_config["model"])])
-        existing_logs = SessionRecorder.current_logs(sessions_root)
-        launch_time = time.time()
-        recorder = SessionRecorder(
-            workspace=task.workspace,
-            recording_dir=recording_dir,
-            recording_id=task.recording_id,
-            manifest=task.manifest,
-            launch_time=launch_time,
-            existing_logs=existing_logs,
-            sessions_root=sessions_root,
-        )
-        recorder.start()
-        if not continue_existing and validated_web is None:
-            command.append(task.prompt)
-        if progress:
-            if continue_existing or validated_web is not None:
-                progress("正在启动 Codex 修改会话；请在会话中输入修改要求")
-            else:
-                progress("正在启动新的 Codex 会话；后续可在会话中自由交互")
-        try:
+            home_context = ManagedHarnessHome(
+                persistent_home,
+                task.recording_id,
+                require_mmap=True,
+            )
+        else:
+            home_context = nullcontext(None)
+        with home_context as harness_home:
             if boyue_config is not None:
-                with codex_forwarding_relay(
-                    str(boyue_config["api_base_url"])
-                ) as relay:
-                    relay_command = [
-                        codex_bin,
-                        "--config",
-                        relay_config_override(relay.base_url),
-                        *command[1:],
-                    ]
+                assert harness_home is not None
+                config_dir = harness_home.runtime_home
+                write_codex_config(
+                    config_dir, boyue_config, workspace=task.workspace
+                )
+                assert selected_token is not None
+                process_env = codex_session_environment(
+                    boyue_config, selected_token.value, config_dir
+                )
+                sessions_root = config_dir / "sessions"
+                command.extend(["--model", str(boyue_config["model"])])
+            existing_logs = SessionRecorder.current_logs(sessions_root)
+            launch_time = time.time()
+            recorder = SessionRecorder(
+                workspace=task.workspace,
+                recording_dir=recording_dir,
+                recording_id=task.recording_id,
+                manifest=task.manifest,
+                launch_time=launch_time,
+                existing_logs=existing_logs,
+                sessions_root=sessions_root,
+            )
+            recorder.start()
+            if not continue_existing and validated_web is None:
+                command.append(task.prompt)
+            if progress:
+                if continue_existing or validated_web is not None:
+                    progress("正在启动 Codex 修改会话；请在会话中输入修改要求")
+                else:
+                    progress("正在启动新的 Codex 会话；后续可在会话中自由交互")
+            try:
+                if boyue_config is not None:
+                    with codex_forwarding_relay(
+                        str(boyue_config["api_base_url"])
+                    ) as relay:
+                        relay_command = [
+                            codex_bin,
+                            "--config",
+                            relay_config_override(relay.base_url),
+                            *command[1:],
+                        ]
+                        process = subprocess.Popen(
+                            relay_command,
+                            cwd=task.workspace,
+                            env=process_env,
+                        )
+                        return_code = process.wait()
+                else:
                     process = subprocess.Popen(
-                        relay_command, cwd=task.workspace, env=process_env
+                        command, cwd=task.workspace, env=process_env
                     )
                     return_code = process.wait()
-            else:
-                process = subprocess.Popen(
-                    command, cwd=task.workspace, env=process_env
+            except FileNotFoundError as exc:
+                raise LauncherError(
+                    f"Codex executable not found: {codex_bin}"
+                ) from exc
+            finally:
+                recorder.request_stop()
+                recorder.join(timeout=10)
+            if recorder.is_alive():
+                raise LauncherError("Recorder did not stop cleanly")
+            if recorder.error:
+                raise LauncherError(
+                    f"Session recorder failed: {recorder.error}"
+                ) from recorder.error
+            if recorder.log_path is None:
+                if return_code != 0:
+                    raise LauncherError(
+                        f"Codex exited with status {return_code} before creating "
+                        "a session log; see the Codex error above"
+                    )
+                raise LauncherError(
+                    "Codex session log was not found; the task repository was prepared but no turns were recorded"
                 )
-                return_code = process.wait()
-        except FileNotFoundError as exc:
-            raise LauncherError(f"Codex executable not found: {codex_bin}") from exc
-        finally:
-            recorder.request_stop()
-            recorder.join(timeout=10)
-        if recorder.is_alive():
-            raise LauncherError("Recorder did not stop cleanly")
-        if recorder.error:
-            raise LauncherError(f"Session recorder failed: {recorder.error}") from recorder.error
-        if recorder.log_path is None:
-            raise LauncherError(
-                "Codex session log was not found; the task repository was prepared but no turns were recorded"
-            )
+            task.manifest = recorder.manifest
+        if harness_home is not None:
+            _record_harness_sync(task.manifest, harness_home, backend=backend)
     elif backend == "claude":
         active_claude_config = (
             boyue_claude_config(boyue_config)
             if boyue_config is not None
             else legacy_claude_config
         )
+        harness_home = None
         if active_claude_config is not None:
-            config_dir = recording_dir / "claude-config"
-            settings_path = config_dir / "settings.json"
+            persistent_home = recording_dir / "claude-config"
+            recover_harness_home(persistent_home)
+            settings_path = persistent_home / "settings.json"
             write_private_json(
                 settings_path, build_claude_settings(task.workspace, recording_dir)
             )
-            assert selected_token is not None
-            process_env = claude_session_environment(
-                active_claude_config, selected_token.value, config_dir
+            home_context = ManagedHarnessHome(
+                persistent_home,
+                task.recording_id,
             )
-            command = [
-                claude_bin,
-                "--settings",
-                str(settings_path),
-                "--model",
-                str(active_claude_config["model"]),
-            ]
         else:
-            settings_path = recording_dir / "claude-settings.json"
-            atomic_json(settings_path, build_claude_settings(task.workspace, recording_dir))
-            process_env = None
-            command = [claude_bin, "--settings", str(settings_path)]
-        if not continue_existing and validated_web is None:
-            command.append(task.prompt)
-        if progress:
-            if continue_existing or validated_web is not None:
-                progress("正在启动 Claude Code 修改会话；请在会话中输入修改要求")
+            home_context = nullcontext(None)
+        with home_context as harness_home:
+            if active_claude_config is not None:
+                assert harness_home is not None
+                config_dir = harness_home.runtime_home
+                settings_path = config_dir / "settings.json"
+                write_private_json(
+                    settings_path,
+                    build_claude_settings(task.workspace, recording_dir),
+                )
+                assert selected_token is not None
+                process_env = claude_session_environment(
+                    active_claude_config,
+                    selected_token.value,
+                    config_dir,
+                )
+                command = [
+                    claude_bin,
+                    "--settings",
+                    str(settings_path),
+                    "--model",
+                    str(active_claude_config["model"]),
+                ]
             else:
-                progress("正在启动新的 Claude Code 会话；后续可在会话中自由交互")
-        try:
-            process = subprocess.Popen(command, cwd=task.workspace, env=process_env)
-            return_code = process.wait()
-        except FileNotFoundError as exc:
-            raise LauncherError(f"Claude Code executable not found: {claude_bin}") from exc
-        task.manifest = json.loads(
-            (recording_dir / "manifest.json").read_text(encoding="utf-8")
-        )
-        errors_path = recording_dir / "hook-errors.jsonl"
-        if errors_path.exists() and errors_path.stat().st_size:
-            task.manifest["state"] = "recorder_failed"
-            task.manifest["agent_exit_code"] = return_code
-            task.manifest["completed_at"] = utc_now()
-            atomic_json(recording_dir / "manifest.json", task.manifest)
-            raise LauncherError(f"Claude Code recorder failed; see {errors_path}")
-        if not task.manifest.get("session_id"):
-            task.manifest["state"] = "recorder_failed"
-            task.manifest["agent_exit_code"] = return_code
-            task.manifest["completed_at"] = utc_now()
-            atomic_json(recording_dir / "manifest.json", task.manifest)
-            raise LauncherError(
-                "Claude Code hooks did not start; ensure the workspace trust prompt was accepted"
+                settings_path = recording_dir / "claude-settings.json"
+                atomic_json(
+                    settings_path,
+                    build_claude_settings(task.workspace, recording_dir),
+                )
+                process_env = None
+                command = [claude_bin, "--settings", str(settings_path)]
+            if not continue_existing and validated_web is None:
+                command.append(task.prompt)
+            if progress:
+                if continue_existing or validated_web is not None:
+                    progress(
+                        "正在启动 Claude Code 修改会话；请在会话中输入修改要求"
+                    )
+                else:
+                    progress(
+                        "正在启动新的 Claude Code 会话；后续可在会话中自由交互"
+                    )
+            try:
+                process = subprocess.Popen(
+                    command, cwd=task.workspace, env=process_env
+                )
+                return_code = process.wait()
+            except FileNotFoundError as exc:
+                raise LauncherError(
+                    f"Claude Code executable not found: {claude_bin}"
+                ) from exc
+            task.manifest = json.loads(
+                (recording_dir / "manifest.json").read_text(encoding="utf-8")
             )
+            errors_path = recording_dir / "hook-errors.jsonl"
+            if errors_path.exists() and errors_path.stat().st_size:
+                task.manifest["state"] = "recorder_failed"
+                task.manifest["agent_exit_code"] = return_code
+                task.manifest["completed_at"] = utc_now()
+                atomic_json(recording_dir / "manifest.json", task.manifest)
+                raise LauncherError(
+                    f"Claude Code recorder failed; see {errors_path}"
+                )
+            if not task.manifest.get("session_id"):
+                task.manifest["state"] = "recorder_failed"
+                task.manifest["agent_exit_code"] = return_code
+                task.manifest["completed_at"] = utc_now()
+                atomic_json(recording_dir / "manifest.json", task.manifest)
+                raise LauncherError(
+                    "Claude Code hooks did not start; ensure the workspace trust prompt was accepted"
+                )
+        if harness_home is not None:
+            _record_harness_sync(task.manifest, harness_home, backend=backend)
     else:
         if boyue_config is None or selected_token is None:
             raise LauncherError("Kimi backend requires a valid Boyue token configuration")
-        config_dir = recording_dir / "kimi-home"
-        write_kimi_config(config_dir, boyue_config)
-        process_env = kimi_session_environment(
-            boyue_config, selected_token.value, config_dir
-        )
-        recorder = KimiSessionRecorder(
-            workspace=task.workspace,
-            recording_dir=recording_dir,
-            recording_id=task.recording_id,
-            manifest=task.manifest,
-            config_dir=config_dir,
-            launch_time=time.time(),
-        )
-        recorder.start()
-        command = [kimi_bin, "--model", kimi_model_alias(boyue_config)]
-        if not continue_existing and validated_web is None:
-            command.extend(["--prompt", task.prompt])
-        if progress:
-            if continue_existing or validated_web is not None:
-                progress("正在启动 Kimi Code 修改会话；请在会话中输入修改要求")
-            else:
-                progress("正在启动 Kimi Code 生成任务")
-        try:
-            process = subprocess.Popen(command, cwd=task.workspace, env=process_env)
-            return_code = process.wait()
-        except FileNotFoundError as exc:
-            raise LauncherError(f"Kimi Code executable not found: {kimi_bin}") from exc
-        finally:
-            recorder.request_stop()
-            recorder.join(timeout=10)
-        if recorder.is_alive():
-            raise LauncherError("Kimi recorder did not stop cleanly")
-        if recorder.error:
-            raise LauncherError(
-                f"Kimi session recorder failed: {recorder.error}"
-            ) from recorder.error
-        if recorder.log_path is None or recorder.session_id is None:
-            raise LauncherError(
-                "Kimi session log was not found; submit at least one prompt before exiting"
+        persistent_home = recording_dir / "kimi-home"
+        recover_harness_home(persistent_home)
+        write_kimi_config(persistent_home, boyue_config)
+        with ManagedHarnessHome(
+            persistent_home,
+            task.recording_id,
+        ) as harness_home:
+            config_dir = harness_home.runtime_home
+            write_kimi_config(config_dir, boyue_config)
+            process_env = kimi_session_environment(
+                boyue_config, selected_token.value, config_dir
             )
-        task.manifest = recorder.manifest
+            recorder = KimiSessionRecorder(
+                workspace=task.workspace,
+                recording_dir=recording_dir,
+                recording_id=task.recording_id,
+                manifest=task.manifest,
+                config_dir=config_dir,
+                launch_time=time.time(),
+            )
+            recorder.start()
+            command = [kimi_bin, "--model", kimi_model_alias(boyue_config)]
+            if not continue_existing and validated_web is None:
+                command.extend(["--prompt", task.prompt])
+            if progress:
+                if continue_existing or validated_web is not None:
+                    progress(
+                        "正在启动 Kimi Code 修改会话；请在会话中输入修改要求"
+                    )
+                else:
+                    progress("正在启动 Kimi Code 生成任务")
+            try:
+                process = subprocess.Popen(
+                    command, cwd=task.workspace, env=process_env
+                )
+                return_code = process.wait()
+            except FileNotFoundError as exc:
+                raise LauncherError(
+                    f"Kimi Code executable not found: {kimi_bin}"
+                ) from exc
+            finally:
+                recorder.request_stop()
+                recorder.join(timeout=10)
+            if recorder.is_alive():
+                raise LauncherError("Kimi recorder did not stop cleanly")
+            if recorder.error:
+                raise LauncherError(
+                    f"Kimi session recorder failed: {recorder.error}"
+                ) from recorder.error
+            if recorder.log_path is None or recorder.session_id is None:
+                raise LauncherError(
+                    "Kimi session log was not found; submit at least one prompt before exiting"
+                )
+            task.manifest = recorder.manifest
+        _record_harness_sync(task.manifest, harness_home, backend=backend)
     task.manifest["state"] = "completed" if return_code == 0 else f"{backend}_failed"
     task.manifest["agent_exit_code"] = return_code
     exit_key = {

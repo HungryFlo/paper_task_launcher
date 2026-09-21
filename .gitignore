@@ -9,12 +9,12 @@ dist/
 .venv/
 venv/
 .DS_Store
+# Local annotator inputs and generated task workspaces must never be uploaded.
+/data/*/
 /out/
 /workspace/
 /token_pool/*
 !/token_pool/.gitkeep
-/data/papers/*.pdf
-/data/papers/*.PDF
 /.recording/
 **/.recording/
 **/claude-config/

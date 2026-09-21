@@ -27,6 +27,19 @@ from paper_task_launcher.util import run_checked
 
 
 class LauncherTests(unittest.TestCase):
+    @patch("paper_task_launcher.launcher.is_default_output_workspace", return_value=True)
+    @patch("paper_task_launcher.launcher.is_inside_existing_worktree", return_value=True)
+    def test_default_output_workspace_may_be_inside_launcher_repository(
+        self,
+        inside_worktree,
+        default_output,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "4"
+            self.assertEqual(validate_empty_workspace(str(workspace)), workspace.resolve())
+        inside_worktree.assert_called_once()
+        default_output.assert_called_once()
+
     def test_kimi_web_copy_launch_and_resume(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -50,6 +63,15 @@ if '--prompt' in args:
 
 home = Path(os.environ['KIMI_CODE_HOME'])
 cwd = Path.cwd()
+persistent_home = cwd / '.recording' / 'kimi-home'
+if home.resolve() == persistent_home.resolve():
+    raise SystemExit('KIMI_CODE_HOME must use local runtime storage')
+if not (home / 'config.toml').is_file():
+    raise SystemExit('missing runtime Kimi config')
+marker = home / 'runtime-state.txt'
+if '--session' in args and marker.read_text() != 'preserved':
+    raise SystemExit('Kimi runtime state was not restored')
+marker.write_text('preserved')
 if '--session' in args:
     session_id = args[args.index('--session') + 1]
 else:
@@ -133,9 +155,28 @@ with wire.open('a') as handle:
             self.assertEqual(manifest["backend"], "kimi")
             self.assertEqual(manifest["turn_count"], 2)
             self.assertEqual(manifest["resume_count"], 1)
+            self.assertEqual(
+                manifest["harness_state"]["runtime_policy"], "local-mirror"
+            )
+            self.assertTrue(
+                Path(manifest["session_log"])
+                .resolve()
+                .is_relative_to(
+                    (workspace / ".recording" / "kimi-home").resolve()
+                )
+            )
             config_text = (
                 workspace / ".recording" / "kimi-home" / "config.toml"
             ).read_text()
+            self.assertEqual(
+                (
+                    workspace
+                    / ".recording"
+                    / "kimi-home"
+                    / "runtime-state.txt"
+                ).read_text(),
+                "preserved",
+            )
             self.assertNotIn("good-secret", config_text)
             self.assertIn("api_key_env", config_text)
 
@@ -369,13 +410,22 @@ import json, os, sys, time
 from pathlib import Path
 workspace = Path(sys.argv[sys.argv.index('--cd') + 1]).resolve()
 config_home = Path(os.environ['CODEX_HOME']).resolve()
-if config_home != workspace / '.recording' / 'codex-home':
-    raise SystemExit('wrong CODEX_HOME')
+persistent_home = workspace / '.recording' / 'codex-home'
+if config_home == persistent_home:
+    raise SystemExit('CODEX_HOME must use local runtime storage')
+if Path(os.environ['CODEX_SQLITE_HOME']).resolve() != config_home:
+    raise SystemExit('CODEX_SQLITE_HOME must use local runtime storage')
+if not (config_home / 'config.toml').is_file():
+    raise SystemExit('missing runtime Codex config')
 if os.environ.get('PAPER_TASK_BOYUE_TOKEN') != 'working-secret':
     raise SystemExit('wrong token')
 if sys.argv[sys.argv.index('--model') + 1] != 'gpt-boyue-test':
     raise SystemExit('wrong model')
 resuming = 'resume' in sys.argv
+marker = config_home / 'runtime-state.txt'
+if resuming and marker.read_text() != 'preserved':
+    raise SystemExit('Codex runtime state was not restored')
+marker.write_text('preserved')
 expected = 9 if resuming else 7
 if len(sys.argv) != expected:
     raise SystemExit('unexpected prompt or arguments: ' + repr(sys.argv))
@@ -442,7 +492,26 @@ time.sleep(0.4)
                 (workspace / ".recording" / "manifest.json").read_text()
             )
             self.assertEqual(manifest["turn_count"], 2)
+            self.assertEqual(
+                manifest["harness_state"]["runtime_policy"], "local-mirror"
+            )
+            self.assertTrue(
+                Path(manifest["session_log"])
+                .resolve()
+                .is_relative_to(
+                    (workspace / ".recording" / "codex-home").resolve()
+                )
+            )
             self.assertTrue((workspace / ".recording" / "codex-home" / "config.toml").is_file())
+            self.assertEqual(
+                (
+                    workspace
+                    / ".recording"
+                    / "codex-home"
+                    / "runtime-state.txt"
+                ).read_text(),
+                "preserved",
+            )
             self.assertNotIn(
                 "working-secret",
                 (workspace / ".recording" / "codex-home" / "config.toml").read_text(),
@@ -510,11 +579,17 @@ if '-p' in sys.argv:
     raise SystemExit(0)
 settings_path = Path(sys.argv[sys.argv.index('--settings') + 1]).resolve()
 workspace = Path.cwd()
-if settings_path.parent != workspace / '.recording' / 'claude-config':
-    raise SystemExit('wrong config directory')
+config_home = Path(os.environ['CLAUDE_CONFIG_DIR']).resolve()
+persistent_home = workspace / '.recording' / 'claude-config'
+if settings_path.parent != config_home or config_home == persistent_home:
+    raise SystemExit('Claude must use local runtime storage')
 if sys.argv[sys.argv.index('--model') + 1] != 'kimi-web-test':
     raise SystemExit('wrong model')
 resuming = '--resume' in sys.argv
+marker = config_home / 'runtime-state.txt'
+if resuming and marker.read_text() != 'preserved':
+    raise SystemExit('Claude runtime state was not restored')
+marker.write_text('preserved')
 if (not resuming and len(sys.argv) != 5) or (resuming and len(sys.argv) != 7):
     raise SystemExit('unexpected prompt or arguments: ' + repr(sys.argv))
 settings = json.loads(settings_path.read_text())
@@ -572,6 +647,25 @@ subprocess.run([hook['command'], *hook['args']], input=json.dumps(stop), text=Tr
             self.assertEqual(manifest["generated_model"], "original-generator")
             self.assertEqual(manifest["modification_model"], "kimi-web-test")
             self.assertEqual(manifest["turn_count"], 2)
+            self.assertEqual(
+                manifest["harness_state"]["runtime_policy"], "local-mirror"
+            )
+            self.assertTrue(
+                Path(manifest["session_log"])
+                .resolve()
+                .is_relative_to(
+                    (workspace / ".recording" / "claude-config").resolve()
+                )
+            )
+            self.assertEqual(
+                (
+                    workspace
+                    / ".recording"
+                    / "claude-config"
+                    / "runtime-state.txt"
+                ).read_text(),
+                "preserved",
+            )
     def test_rejects_nonempty_workspace(self):
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary) / "task"
@@ -1012,7 +1106,10 @@ if sys.argv[sys.argv.index('--model') + 1] != 'kimi-k3':
     raise SystemExit('wrong model')
 workspace = Path.cwd()
 settings = json.loads(settings_path.read_text())
-common = {'session_id':'managed-session','transcript_path':'/tmp/managed.jsonl','cwd':str(workspace)}
+config_home = Path(os.environ['CLAUDE_CONFIG_DIR'])
+transcript = config_home / 'managed.jsonl'
+transcript.touch()
+common = {'session_id':'managed-session','transcript_path':str(transcript),'cwd':str(workspace)}
 resuming = '--resume' in sys.argv
 prompt = 'managed follow up' if resuming else sys.argv[-1]
 prompt_id = 'managed-2' if resuming else 'managed-1'
