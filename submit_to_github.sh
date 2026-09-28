@@ -14,7 +14,7 @@ if [[ -z "$branch_name" ]]; then
 fi
 
 if ! git remote get-url "$remote_name" >/dev/null 2>&1; then
-  echo "paper-task submit: 找不到 Git remote：$remote_name" >&2
+  echo "paper-task submit: 找不到 Git remote：${remote_name}" >&2
   exit 1
 fi
 
@@ -81,7 +81,7 @@ if [[ -n "$tracked_unsafe" ]]; then
   exit 1
 fi
 
-echo "[6/6] 推送到 $remote_name/$branch_name……"
+echo "[6/6] 推送到 ${remote_name}/${branch_name}……"
 git push "$remote_name" "$branch_name"
 
-echo "完成：代码已推送到 $remote_name/$branch_name"
+echo "完成：代码已推送到 ${remote_name}/${branch_name}"
