@@ -124,6 +124,23 @@ python3 -m pip install -e .
 paper-task --help
 ```
 
+### 更新到最新版本
+
+已经安装过本项目的同事，在项目目录中执行：
+
+```bash
+git pull origin main
+python3 -m pip install -e .
+```
+
+建议每次拉取新版本后重新执行一次安装命令。虽然可编辑安装通常会立即读取最新 Python 源码，但重新安装可以同步命令行入口、依赖声明和包元数据。随后可检查本次新增功能：
+
+```bash
+paper-task resume --help
+```
+
+帮助信息中应包含 `--fresh-session`。
+
 ## 3. 配置 Boyue token
 
 项目目录下需要有以下文件：
@@ -238,6 +255,8 @@ Codex、Claude Code 和 Kimi Code 不会直接在共享 workspace 中运行其�
 | Claude Code | `.recording/claude-config/` | `CLAUDE_CONFIG_DIR`                 |
 | Kimi Code   | `.recording/kimi-home/`     | `KIMI_CODE_HOME`                    |
 
+Kimi 的任务级模型配置会声明 `thinking`、`image_in`、`video_in` 和 `tool_use`，因此在所选模型及 Boyue 接口支持的前提下，Kimi Code 可以读取图片和视频输入。新任务会直接使用该配置；旧 Kimi 任务在下一次执行 `paper-task resume` 时会重新生成任务级配置并启用这些能力。
+
 默认运行目录位于 `/tmp/paper-task-harness-<uid>/`。如需调整，可以指定一个支持文件锁和可写 `mmap` 的本地目录：
 
 ```bash
@@ -271,6 +290,24 @@ paper-task resume \
 | `--workspace PATH` | 恢复显式指定的任务 workspace；与`--paperID` 二选一。 |
 
 恢复时会自动读取原任务的 backend、model、Boyue URL 和 session ID，并重新从 `token_pool/.env.token` 测试 token。不需要重新传入模型或 backend。
+
+### Codex 更换 token 后启动新会话
+
+如果旧 token 已失效，新的 token 可能无法解密旧 Codex session。此时可在原 workspace 内启动一个新的 Codex session：
+
+```bash
+paper-task resume --paperID 2 --fresh-session
+```
+
+自定义 workspace 也可以直接使用原目录：
+
+```bash
+paper-task resume \
+  --workspace /path/to/old-workspace \
+  --fresh-session
+```
+
+`--fresh-session` 目前只支持 Codex。它会重新测试 token，在同一个 workspace 中创建新 session，并继续沿用原有 transcript、baseline、轮次编号和 Web 快照链。因此后续仍可使用 `paper-task export --paperID 2` 或对应的 `--workspace` 导出刷新前后的完整记录。
 
 ## 6. 修改完成后导出数据
 
@@ -320,3 +357,19 @@ out_data/
 - `turns.jsonl`：每轮的用户输入、模型回复、模型名称和对应快照。
 
 `out_data/` 必须不存在或为空目录。导出器不会覆盖已有数据，也不会将 `out_data/` 再次记录到 Web 快照中。
+
+## 7. 维护者提交代码到 GitHub
+
+仓库根目录提供了安全提交脚本。它会先运行完整测试、暂存代码、拒绝标注数据或凭据文件、创建提交、拉取远端更新并推送当前分支：
+
+```bash
+./submit_to_github.sh "Enable Kimi multimodal and Codex fresh session"
+```
+
+提交信息可以省略：
+
+```bash
+./submit_to_github.sh
+```
+
+脚本不会上传 `data/<标注者>/`、`out/`、`workspace/`、`out_data/`、`token_pool/.env.token`、`.recording/` 或各 harness 的任务级配置。执行前需要先完成 GitHub 登录，并确保自己拥有仓库的 push 权限。

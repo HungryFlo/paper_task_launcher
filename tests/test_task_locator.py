@@ -74,8 +74,10 @@ class TaskLocatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "new" / "out"
             self.assertEqual(normalize_paper_id("004"), "4")
-            self.assertEqual(workspace_for_paper_id("004", output_root=root), root / "4")
-            self.assertEqual(ensure_default_output_root(root), root)
+            self.assertEqual(
+                workspace_for_paper_id("004", output_root=root), root.resolve() / "4"
+            )
+            self.assertEqual(ensure_default_output_root(root), root.resolve())
             self.assertTrue(root.is_dir())
             self.assertFalse((root / "4").exists())
 

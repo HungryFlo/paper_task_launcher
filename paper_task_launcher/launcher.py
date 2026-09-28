@@ -589,10 +589,15 @@ def resume_task(
     codex_bin: str = "codex",
     claude_bin: str = "claude",
     kimi_bin: str = "kimi",
+    fresh_session: bool = False,
     progress: Callable[[str], None] | None = console_progress,
 ) -> int:
     workspace, recording_dir, manifest = _load_recording(workspace_value)
     backend = manifest.get("backend", "codex")
+    if fresh_session and backend != "codex":
+        raise LauncherError(
+            "--fresh-session is currently supported only for Codex recordings"
+        )
     session_id = str(manifest["session_id"])
     agent_bin, agent_name, config_dir_name = _agent_details(
         backend, codex_bin, claude_bin, kimi_bin
@@ -603,6 +608,7 @@ def resume_task(
     with _recording_lock(recording_dir):
         # Reload after acquiring the lock so validation and append use the latest state.
         workspace, recording_dir, manifest = _load_recording(workspace_value)
+        session_id = str(manifest["session_id"])
         selected_token = None
         boyue_config = validate_boyue_config(
             manifest.get("boyue_provider"), backend=backend
@@ -631,7 +637,7 @@ def resume_task(
                     legacy_claude_config, claude_bin, progress=progress
                 )
                 record_token_selection(legacy_claude_config, selected_token)
-        if boyue_config is not None:
+        if boyue_config is not None and not (fresh_session and backend == "codex"):
             config_dir = recording_dir / config_dir_name
             recover_harness_home(config_dir)
             recorded_log = manifest.get("session_log")
@@ -658,7 +664,14 @@ def resume_task(
             "started_at": utc_now(),
             "previous_state": manifest.get("state"),
             "turn_count_before": manifest.get("turn_count", 0),
+            "mode": "fresh_session" if fresh_session else "resume",
+            "previous_session_id": session_id,
         }
+        if fresh_session:
+            rollover_count = manifest.get("session_rollover_count", 0)
+            if not isinstance(rollover_count, int) or rollover_count < 0:
+                raise LauncherError("Recording manifest has invalid session rollover count")
+            manifest["session_rollover_count"] = rollover_count + 1
         resume_history.append(resume_entry)
         manifest["resume_count"] = len(resume_history)
         manifest["state"] = "recording"
@@ -668,7 +681,11 @@ def resume_task(
         if backend == "codex":
             process_env = None
             sessions_root = None
-            command = [codex_bin, "resume", "--cd", str(workspace)]
+            command = (
+                [codex_bin, "--cd", str(workspace)]
+                if fresh_session
+                else [codex_bin, "resume", "--cd", str(workspace)]
+            )
             harness_home = None
             if boyue_config is not None:
                 persistent_home = recording_dir / "codex-home"
@@ -694,10 +711,13 @@ def resume_task(
                     )
                     sessions_root = config_dir / "sessions"
                     command.extend(["--model", str(boyue_config["model"])])
-                command.append(session_id)
+                if not fresh_session:
+                    command.append(session_id)
                 existing_logs = SessionRecorder.current_logs(sessions_root)
                 resume_offsets: dict[Path, int] = {}
-                if harness_home is not None:
+                if fresh_session:
+                    log_path = None
+                elif harness_home is not None:
                     log_path = _runtime_session_log(manifest, harness_home)
                 else:
                     recorded_log = manifest.get("session_log")
@@ -721,15 +741,22 @@ def resume_task(
                     manifest=manifest,
                     launch_time=time.time(),
                     existing_logs=existing_logs,
-                    resume_session_id=session_id,
+                    resume_session_id=None if fresh_session else session_id,
                     resume_offsets=resume_offsets,
                     sessions_root=sessions_root,
                 )
                 recorder.start()
                 if progress:
-                    progress(
-                        f"正在恢复 Codex 会话 {session_id}，将从第 {manifest['turn_count'] + 1} 轮继续记录"
-                    )
+                    if fresh_session:
+                        progress(
+                            f"正在原 workspace 启动新的 Codex 会话；旧会话 {session_id} "
+                            f"已保留，将从第 {manifest['turn_count'] + 1} 轮继续记录"
+                        )
+                    else:
+                        progress(
+                            f"正在恢复 Codex 会话 {session_id}，"
+                            f"将从第 {manifest['turn_count'] + 1} 轮继续记录"
+                        )
                 try:
                     if boyue_config is not None:
                         with codex_forwarding_relay(
@@ -766,6 +793,15 @@ def resume_task(
                     raise LauncherError(
                         f"Session recorder failed: {recorder.error}"
                     ) from recorder.error
+                if fresh_session and (
+                    recorder.log_path is None or not recorder.manifest.get("session_id")
+                ):
+                    manifest["state"] = "recorder_failed"
+                    manifest["completed_at"] = utc_now()
+                    atomic_json(recording_dir / "manifest.json", manifest)
+                    raise LauncherError(
+                        "Fresh Codex session log was not found; no new session was recorded"
+                    )
                 manifest = recorder.manifest
             if harness_home is not None:
                 _record_harness_sync(manifest, harness_home, backend=backend)
@@ -929,6 +965,7 @@ def resume_task(
             history[-1]["completed_at"] = utc_now()
             history[-1]["exit_code"] = return_code
             history[-1]["turn_count_after"] = manifest.get("turn_count", 0)
+            history[-1]["session_id_after"] = manifest.get("session_id")
         manifest["state"] = "completed" if return_code == 0 else f"{backend}_failed"
         manifest["agent_exit_code"] = return_code
         exit_key = {

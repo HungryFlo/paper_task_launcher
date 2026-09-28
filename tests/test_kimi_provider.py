@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import time
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -30,6 +31,11 @@ class KimiProviderTests(unittest.TestCase):
             self.assertIn(f'api_key_env = "{TOKEN_ENV_KEY}"', text)
             self.assertIn('base_url = "http://boyue.example/v1"', text)
             self.assertIn('model = "kimi-k3"', text)
+            parsed = tomllib.loads(text)
+            self.assertEqual(
+                parsed["models"]["paper-task/kimi-k3"]["capabilities"],
+                ["thinking", "image_in", "video_in", "tool_use"],
+            )
             self.assertNotIn("secret-value", text)
             self.assertEqual(model_alias(config), "paper-task/kimi-k3")
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)

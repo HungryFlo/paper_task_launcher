@@ -149,6 +149,14 @@ def build_resume_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codex-bin", default="codex", help="Codex CLI executable")
     parser.add_argument("--claude-bin", default="claude", help="Claude Code CLI executable")
     parser.add_argument("--kimi-bin", default="kimi", help="Kimi Code CLI executable")
+    parser.add_argument(
+        "--fresh-session",
+        action="store_true",
+        help=(
+            "Start a new Codex session in the same workspace while preserving "
+            "the existing transcript and Web snapshot chain"
+        ),
+    )
     return parser
 
 
@@ -194,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
                 codex_bin=args.codex_bin,
                 claude_bin=args.claude_bin,
                 kimi_bin=args.kimi_bin,
+                fresh_session=args.fresh_session,
             )
         args = build_parser().parse_args(arguments)
         paper_id = None

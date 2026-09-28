@@ -45,7 +45,7 @@ def render_config(config: dict) -> str:
         f"provider = {json.dumps(PROVIDER_ID)}\n"
         f"model = {json.dumps(str(config['model']), ensure_ascii=False)}\n"
         f"max_context_size = {MAX_CONTEXT_SIZE}\n"
-        'capabilities = ["thinking", "tool_use"]\n'
+        'capabilities = ["thinking", "image_in", "video_in", "tool_use"]\n'
         f"display_name = {json.dumps(str(config['model']), ensure_ascii=False)}\n"
     )
     # Validate locally without starting Kimi or making a network request.

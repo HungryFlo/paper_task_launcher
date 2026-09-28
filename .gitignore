@@ -14,8 +14,12 @@ venv/
 !/data/.gitkeep
 /out/
 /workspace/
+**/out_data/
 /token_pool/*
 !/token_pool/.gitkeep
+.env
+.env.*
+*.token
 /.recording/
 **/.recording/
 **/claude-config/

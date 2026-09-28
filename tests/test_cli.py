@@ -45,6 +45,16 @@ class CliTests(unittest.TestCase):
                     ["--workspace", "task", "--claude-model", "different-model"]
                 )
 
+    def test_resume_parses_fresh_session_with_workspace_or_paper_id(self):
+        by_workspace = build_resume_parser().parse_args(
+            ["--workspace", "task", "--fresh-session"]
+        )
+        by_paper_id = build_resume_parser().parse_args(
+            ["--paperID", "2", "--fresh-session"]
+        )
+        self.assertTrue(by_workspace.fresh_session)
+        self.assertTrue(by_paper_id.fresh_session)
+
     def test_export_output_is_optional(self):
         args = build_export_parser().parse_args(["--workspace", "task"])
         self.assertIsNone(args.output)
@@ -181,10 +191,11 @@ class CliTests(unittest.TestCase):
         return_value=Path("/project/out/4"),
     )
     def test_main_resolves_resume_paper_id(self, workspace_for_id, resume):
-        code = main(["resume", "--paperID", "4"])
+        code = main(["resume", "--paperID", "4", "--fresh-session"])
         self.assertEqual(code, 0)
         workspace_for_id.assert_called_once_with("4")
         self.assertEqual(resume.call_args.args[0], "/project/out/4")
+        self.assertTrue(resume.call_args.kwargs["fresh_session"])
 
 
 if __name__ == "__main__":

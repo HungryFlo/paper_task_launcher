@@ -555,6 +555,145 @@ time.sleep(0.4)
             self.assertEqual(unchanged["state"], "completed")
             self.assertEqual(unchanged["resume_count"], 1)
 
+    def test_codex_fresh_session_keeps_transcript_and_snapshot_chain(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "web"
+            source.mkdir()
+            (source / "index.html").write_text("baseline\n", encoding="utf-8")
+            paper = root / "paper.pdf"
+            paper.write_bytes(b"%PDF-1.4\nfresh session task\n")
+            tokens = root / "tokens.env"
+            tokens.write_text("OLD=old-secret\nNEW=new-secret\n", encoding="utf-8")
+            workspace = root / "task"
+            fake = root / "codex"
+            fake.write_text(
+                """#!/usr/bin/env python3
+import json, os, sys, time
+from pathlib import Path
+
+if 'resume' in sys.argv:
+    raise SystemExit('fresh session must not invoke codex resume')
+workspace = Path(sys.argv[sys.argv.index('--cd') + 1]).resolve()
+home = Path(os.environ['CODEX_HOME'])
+counter_path = home / 'fake-run-count'
+run = int(counter_path.read_text()) + 1 if counter_path.exists() else 1
+counter_path.write_text(str(run))
+expected_token = 'old-secret' if run == 1 else 'new-secret'
+if os.environ.get('PAPER_TASK_BOYUE_TOKEN') != expected_token:
+    raise SystemExit('wrong token for run')
+session_id = f'fresh-session-{run}'
+turn_id = f'fresh-turn-{run}'
+log = home / 'sessions' / '2026' / '01' / f'0{run}' / f'rollout-{run}.jsonl'
+log.parent.mkdir(parents=True, exist_ok=True)
+(workspace / 'index.html').write_text(f'v{run}\\n')
+records = [
+  {'timestamp':f'2026-01-0{run}T00:00:00Z','type':'session_meta','payload':{'session_id':session_id,'cwd':str(workspace),'cli_version':'test'}},
+  {'timestamp':f'2026-01-0{run}T00:00:01Z','type':'event_msg','payload':{'type':'task_started','turn_id':turn_id}},
+  {'timestamp':f'2026-01-0{run}T00:00:02Z','type':'event_msg','payload':{'type':'user_message','message':f'change {run}'}},
+  {'timestamp':f'2026-01-0{run}T00:00:03Z','type':'event_msg','payload':{'type':'task_complete','turn_id':turn_id,'last_agent_message':f'done {run}'}},
+]
+with log.open('w') as handle:
+    for record in records:
+        handle.write(json.dumps(record) + '\\n')
+        handle.flush()
+time.sleep(0.4)
+""",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+
+            @contextmanager
+            def fake_relay(_upstream: str):
+                yield SimpleNamespace(base_url="http://127.0.0.1:12345/v1")
+
+            selections = [
+                TokenCandidate("OLD", "old-secret", 0),
+                TokenCandidate("NEW", "new-secret", 1),
+            ]
+            with patch(
+                "paper_task_launcher.launcher.select_codex_token",
+                side_effect=selections,
+            ), patch(
+                "paper_task_launcher.launcher.codex_forwarding_relay",
+                side_effect=fake_relay,
+            ):
+                self.assertEqual(
+                    launch_task(
+                        str(workspace),
+                        str(paper),
+                        backend="codex",
+                        codex_bin=str(fake),
+                        continue_existing=True,
+                        web_source=str(source),
+                        model="gpt-boyue-test",
+                        token_file=str(tokens),
+                        boyue_url="https://boyue.example",
+                        progress=None,
+                    ),
+                    0,
+                )
+                first_manifest = json.loads(
+                    (workspace / ".recording" / "manifest.json").read_text()
+                )
+                self.assertEqual(first_manifest["session_id"], "fresh-session-1")
+                Path(first_manifest["session_log"]).unlink()
+                self.assertEqual(
+                    resume_task(
+                        str(workspace),
+                        codex_bin=str(fake),
+                        fresh_session=True,
+                        progress=None,
+                    ),
+                    0,
+                )
+
+            turns = [
+                json.loads(line)
+                for line in (workspace / ".recording" / "transcript.jsonl")
+                .read_text()
+                .splitlines()
+            ]
+            self.assertEqual([turn["turn_index"] for turn in turns], [1, 2])
+            self.assertEqual([turn["user_input"] for turn in turns], ["change 1", "change 2"])
+            self.assertEqual([turn["final_response"] for turn in turns], ["done 1", "done 2"])
+            self.assertEqual(
+                run_checked(
+                    ["git", "rev-parse", f"{turns[1]['snapshot']['commit']}^"],
+                    cwd=workspace,
+                ),
+                turns[0]["snapshot"]["commit"],
+            )
+            manifest = json.loads(
+                (workspace / ".recording" / "manifest.json").read_text()
+            )
+            self.assertEqual(manifest["session_id"], "fresh-session-2")
+            self.assertEqual(manifest["turn_count"], 2)
+            self.assertEqual(manifest["session_rollover_count"], 1)
+            self.assertEqual(manifest["resume_history"][0]["mode"], "fresh_session")
+            self.assertEqual(
+                manifest["resume_history"][0]["previous_session_id"],
+                "fresh-session-1",
+            )
+            self.assertEqual(
+                manifest["resume_history"][0]["session_id_after"],
+                "fresh-session-2",
+            )
+            output = export_dataset(str(workspace), str(root / "export"), progress=None)
+            exported_turns = [
+                json.loads(line)
+                for line in (output / "turns.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(len(exported_turns), 2)
+            self.assertEqual(
+                (output / "versions" / "turn-0001" / "index.html").read_text(),
+                "v1\n",
+            )
+            self.assertEqual(
+                (output / "versions" / "turn-0002" / "index.html").read_text(),
+                "v2\n",
+            )
+
     def test_claude_web_copy_uses_user_selected_model_without_prompt(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
